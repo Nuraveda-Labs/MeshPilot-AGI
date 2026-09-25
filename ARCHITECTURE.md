@@ -346,12 +346,11 @@ adapters would follow the same pattern.
   scheduler tick, and spawns the HeyGen-MCP OAuth keepalive (~30 min).
 - **Branches — single trunk, no `main`/`preview`:** `production` is the trunk *and*
   the API deploy branch (GitHub default); lanes PR **into** it and merging
-  auto-deploys. `web-production` is the `web/` waitlist site (Cloudflare Pages),
-  fast-forwarded from `production`. Deploy branches are never developed on.
+  auto-deploys. Deploy branches are never developed on.
 - **CI (`.github/workflows/ci.yml`) runs on push to `production`, drift-aware:**
   `pytest` + import smoke on API drift; a from-scratch **migration replay +
   idempotency re-apply** (pgvector/pg17) on `supabase/migrations/` or `db/` drift;
-  `npm run build` on `web/` drift; `py_compile` + `docker build` on `gateway/`
+  `py_compile` + `docker build` on `gateway/`
   drift; **nothing** (fast pass) for docs. CI validates; it is not a pre-merge
   gate, so run `uv run pytest -q` locally before merging.
 

@@ -325,9 +325,8 @@ Patterns adapted from **Hermes** (memory-first + curator) and **OpenClaw**
 | Publishing | **Buffer** · **Meta Graph API** · **YouTube** | gated OFF by policy |
 | Email | **Resend** | agent `send_email` (gated OFF) |
 | Cost / budget | **self-metered** `usage_events` (per-brand) | meters OpenRouter + media vendors; per-run + daily budgets |
-| Web (waitlist) | **Next.js** (App Router, static export) → **Cloudflare Pages** | `web/`, `meshpilot.app` |
 | Migrations | **Supabase-native SQL** | `supabase/migrations/*.sql` (Alembic retired) |
-| CI/CD | **GitHub Actions** (drift-aware) | runs on push to `production` |
+| CI/CD | **GitHub Actions** | import smoke + suite on every PR |
 | Observability | **Logfire** · **Sentry** · **structlog** | |
 | Secrets / auth | FastAPI Cloud env secrets · **Fernet** (token storage) · **OAuth 2.0** (HeyGen MCP) | per-brand `<PREFIX>_*`, no globals |
 
@@ -420,9 +419,7 @@ src/meshpilot/
   db/  oauth/  crypto.py    SQLModel + async session; per-platform token storage (Fernet)
 supabase/migrations/        Supabase-native SQL migrations (Alembic retired)
 brand/                      Per-brand config templates (real values are env/secret)
-web/                        Waitlist site (Next.js) — deployed separately via Cloudflare Pages
 docs/                       Doc-driven workflow (start at docs/DOC-SYSTEM.md; north star docs/VISION.md)
-control-plane/              ACTIVE_LANE_BOARD.md · SESSION_COORDINATION.md · ENGINEERING_SUPERVISOR.md
 ```
 
 ---
@@ -449,14 +446,14 @@ uv run fastapi dev main.py    # local run
 Any ASGI host works. The maintainers use FastAPI Cloud; the app id, team and region
 are deployment detail and are deliberately not published here.
 
-- **Branch model — single trunk, no `main`/`preview`:**
-  - **`production`** — the trunk **and** the API deploy branch (GitHub default).
-    Lanes PR **into** it; merging auto-deploys the agent. Protected — never commit
-    directly.
-  - **`web-production`** — the `web/` waitlist site (Cloudflare Pages),
-    fast-forwarded from `production`.
-- **CI** runs **on push to `production`** (drift-aware): pytest on API drift, a
-  Supabase-migration apply on DB drift, the Next build on `web/` drift.
+- **Branch model:** `main` is the trunk. Branch, PR into it, merge. Point your host's
+  auto-deploy at `main` and a merge ships.
+- **CI** (`.github/workflows/ci.yml`) runs on every PR and on push to `main`: an import
+  smoke test on the ASGI entrypoint, then the suite. It needs no secrets and no services —
+  if a test starts requiring an env var, that is a bug in the test.
+  A second job runs the leak gate, but **only once you have written
+  `prepublish.config.json`**; unconfigured, it skips and says so rather than printing a
+  pass over a repo nobody checked.
 - **Migrations** are Supabase-native (`supabase/migrations/*.sql`), applied by the
   Supabase↔GitHub integration on merge. **Additive migrations before code, removals
   after.**

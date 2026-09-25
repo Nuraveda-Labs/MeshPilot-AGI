@@ -1,0 +1,71 @@
+name: CI
+
+# Runs as a GATE on pull requests, and again on push to `main` as the record of what the
+# trunk actually is. A PR that was green against a stale base can still break `main` once
+# something else lands ahead of it.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege: every job only reads the repo.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # SHA-pinned, not tagged. A tag is mutable and a supply-chain foothold; the comment
+      # records which release the SHA is, so upgrading stays a readable diff.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+
+      - name: Install
+        run: uv sync --extra dev          # pytest and ruff live in the dev extra
+
+      - name: Import smoke test
+        # The ASGI entrypoint must load with no configuration at all. This catches an
+        # import-time dependency on a credential or a file the clone does not have —
+        # which is exactly how a template breaks for everyone except its author.
+        run: uv run python -c "import main; assert main.app is not None; print('app import OK')"
+
+      - name: Tests
+        # No secrets, no services. The suite is expected to pass in a bare clone; if it
+        # starts needing an env var, that is a bug in the test, not a reason to add one.
+        run: uv run pytest -q
+
+      - name: Lint
+        run: uv run ruff check src tests || true   # advisory while the baseline is worked down
+
+  # ── Leak gate ───────────────────────────────────────────────────────────────────────
+  # Only meaningful once YOU have declared your own names. See prepublish.config.example.json.
+  prepublish-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+
+      - name: Run the pre-publish gate (only if configured)
+        # ⚠️ Deliberately NOT `cp prepublish.config.example.json prepublish.config.json`.
+        # That would scan for placeholder names, match nothing, and print PASS — a green
+        # tick over a repo nobody has configured. A gate that passes because it was never
+        # set up is worse than no gate, because it is trusted. So: skip loudly instead.
+        run: |
+          if [ -f prepublish.config.json ]; then
+            uv sync --extra dev
+            uv run python scripts/prepublish_gate.py
+          else
+            echo "::notice title=Leak gate not configured::No prepublish.config.json, so the"\
+                 "gate did NOT run. This step is green because it was skipped, not because"\
+                 "anything was checked. To enable it:"
+            echo "  cp prepublish.config.example.json prepublish.config.json"
+            echo "  # then put YOUR brand names, env prefixes and people in it"
+          fi

@@ -1,0 +1,100 @@
+"""CLIPNET auto publishing (A3/A4): the gate fails closed, the kill switch holds, and the worker
+execution body carries the per-job overrides (spec § 5–6)."""
+from types import SimpleNamespace
+
+from meshpilot.agent.clipnet import publish, worker_client
+from meshpilot.agent.clipnet.campaigns import Campaign
+
+CAMPAIGN = Campaign(slug="lovable", brand_ids=("ai_empire",), subject="Lovable or its CEO Anton Osika",
+                    required_hashtags=("#LovablePartner",), allowed_sources=("youtube:9FGMhz-e97k",),
+                    submit_platforms=("instagram", "tiktok", "youtube"), disclosure="paid_promotion",
+                    submit_window_min=10, max_clips_per_day=5, active=True)
+
+
+def _clip(**over):
+    base = {"id": "c1", "start_s": 316.2, "hook": "The 99 percent can build",
+            "caption": "Anton on who gets to build now.\n\n#LovablePartner",
+            "stage_outputs": {"source": {"key": "youtube:9FGMhz-e97k"},
+                              "picks": [{"start": 316.2, "text": "With Lovable anyone can build software."}]}}
+    base.update(over)
+    return base
+
+
+def test_a_compliant_clip_passes():
+    assert publish.gate(_clip(), CAMPAIGN) is None
+
+
+def test_missing_required_hashtag_blocks():
+    assert "missing required hashtags" in publish.gate(_clip(caption="No tag here."), CAMPAIGN)
+
+
+def test_hashtag_match_is_case_insensitive():
+    assert publish.gate(_clip(caption="ok #lovablepartner"), CAMPAIGN) is None
+
+
+def test_a_source_not_on_the_allow_list_blocks():
+    so = {"source": {"key": "youtube:SOMEOTHERID"}, "picks": _clip()["stage_outputs"]["picks"]}
+    assert "not on the campaign's allowed list" in publish.gate(_clip(stage_outputs=so), CAMPAIGN)
+
+
+def test_an_unknown_source_blocks():
+    so = {"picks": _clip()["stage_outputs"]["picks"]}
+    assert "not on the campaign's allowed list" in publish.gate(_clip(stage_outputs=so), CAMPAIGN)
+
+
+def test_off_subject_clip_text_blocks():
+    so = {"source": {"key": "youtube:9FGMhz-e97k"}, "picks": [{"start": 316.2, "text": "Talking about lunch."}]}
+    assert "never mentions the campaign subject" in publish.gate(_clip(stage_outputs=so), CAMPAIGN)
+
+
+def test_clip_text_is_matched_to_the_pick_by_start_time():
+    so = {"picks": [{"start": 10.0, "text": "a"}, {"start": 316.3, "text": "b"}]}
+    assert publish.clip_text(so, 316.2) == "b"
+    assert publish.clip_text(so, 99.0) == ""
+
+
+def test_subject_terms_drop_short_and_stop_words():
+    assert publish.subject_terms("Lovable or its CEO Anton Osika") == {"lovable", "anton", "osika"}
+
+
+def test_youtube_title_carries_the_hashtag_and_fits_100_chars():
+    t = publish.youtube_title("x" * 120, ("#LovablePartner",))
+    assert len(t) == 100
+    assert publish.youtube_title("Demo, don't memo", ("#LovablePartner",)) == "Demo, don't memo #LovablePartner #shorts"
+
+
+async def test_publish_is_a_no_op_while_the_kill_switch_is_off(monkeypatch):
+    monkeypatch.setattr(publish, "enabled", lambda: False)
+    out = await publish.publish_next("ai_empire", engine=object())
+    assert "skipped" in out
+
+
+def test_enabled_needs_both_switches(monkeypatch):
+    import meshpilot.config as cfg
+
+    for clipnet, pub, want in ((True, True, True), (True, False, False), (False, True, False)):
+        monkeypatch.setattr(cfg, "settings", lambda c=clipnet, p=pub: SimpleNamespace(
+            agent_clipnet_enabled=c, agent_publish_enabled=p))
+        assert publish.enabled() is want
+
+
+def test_routing_is_standard_buffer_for_x_tiktok_youtube_meta_for_the_rest():
+    assert set(publish.BUFFER_SERVICE) == {"x", "tiktok", "youtube"}
+    assert set(publish.PLATFORMS) - set(publish.BUFFER_SERVICE) == {"instagram", "facebook"}
+
+
+def test_worker_execution_body_overrides_job_and_bucket():
+    body = worker_client.run_body("job-1", "aie-media", 2)
+    env = {e["name"]: e["value"] for e in body["overrides"]["containerOverrides"][0]["env"]}
+    assert env == {"JOB_ID": "job-1", "BUCKET": "aie-media", "N_CLIPS": "2"}
+
+
+def test_start_execution_raises_on_a_refusal():
+    class _S:
+        def post(self, *a, **k):
+            return SimpleNamespace(status_code=403, text="denied", json=lambda: {})
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="403"):
+        worker_client.start_execution("job-1", "aie-media", session=_S())

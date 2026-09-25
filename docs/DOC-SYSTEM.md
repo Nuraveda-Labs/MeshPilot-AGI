@@ -1,0 +1,72 @@
+# Doc System
+
+> The master map. This file tells every agent which docs exist, what each one
+> governs, and which wins when they disagree. Read it first.
+
+A repo running the Method has a small, ordered set of docs. The point isn't
+"more documentation" — it's a **known set of contracts** with explicit
+precedence, so an agent never guesses where the truth lives.
+
+## Precedence (highest wins)
+
+1. **Direct operator instruction** (this session's chat)
+2. **This file** (`DOC-SYSTEM.md`) — the map
+3. **Spoke docs** — the architecture / product / contract docs named below
+4. **Live control-plane** — `control-plane/ACTIVE_LANE_BOARD.md`, `SESSION_COORDINATION.md`
+5. **Historical evidence** — `control-plane/ENGINEERING_SUPERVISOR.md`
+6. **Generated/meta** — `docs/_meta/*` (retrieval aids, not law)
+7. **Codebase**
+8. **Prior chat claims**
+
+## The doc set
+
+| Doc | Governs | Updated when |
+|---|---|---|
+| `docs/THE-METHOD.md` | the core loop | the workflow itself changes |
+| `docs/AGENT-SYNC-PROTOCOL.md` | the multi-agent contract | coordination rules change |
+| `docs/ROLES.md` | agent division of labor | the roster or split changes |
+| `docs/LANE-LIFECYCLE.md` | how lanes move | the lane process changes |
+| `docs/DOC-SYSTEM.md` | this map + precedence | a doc is added/retired or precedence shifts |
+| `control-plane/ACTIVE_LANE_BOARD.md` | the live work queue | every lane state change |
+| `control-plane/SESSION_COORDINATION.md` | who's active now | sessions start/stop |
+| `control-plane/ENGINEERING_SUPERVISOR.md` | evidence log | every lane close |
+| `docs/VISION.md` | the north star — cloud agent, Projects × Capabilities, runs-on-app, per-project keys | the product vision or a core principle shifts |
+| `docs/BRANDS.md` | the brand registry — which projects/brands are onboarded, their tags, keys, status | a brand is onboarded/retired or its wiring changes |
+| `docs/vendors/*.md` | vendor runbooks — how WE operate each vendor (Meta, Buffer, FastAPI Cloud, Supabase); validated against official docs | a vendor integration or our usage of it changes |
+
+## Docs layout (keep it from sprawling)
+
+- **`docs/` root** — the stable, small control set: this map (`DOC-SYSTEM.md`),
+  `VISION.md`, `BRANDS.md`, and the method docs (`THE-METHOD`, `AGENT-SYNC-PROTOCOL`,
+  `ROLES`, `LANE-LIFECYCLE`). These don't grow.
+- **`docs/vendors/`** — one runbook per vendor. Add a file when we adopt a vendor.
+- **`docs/plans/`** — time-bound plans (dated filenames), retired when the phase closes.
+- Future growing categories get their own folder (e.g. `docs/adr/` for decision
+  records) — register the folder here when you create it.
+| `ARCHITECTURE.md` | the agent's internal design — pipeline, publishers, scheduler, DB, brand/env conventions | a component, integration, or the `GE_`-prefixed per-brand env contract changes |
+| `docs/plans/2026-09-24-clipnet-plan-1-a0-a1.md` | CLIPNET implementation Plan 1 of 4: A0 (Meta resolvers fail closed + remove unprefixed Meta globals) and A1 (clipnet tables + typed campaign record) | a task in it changes, or it is fully executed (retire it then) |
+| `docs/plans/2026-09-24-clipnet-auto-pipeline.md` | CLIPNET auto mode: Discord link → Railway worker → gate → publish ×5 → Sheet + Whop ping; job states, failure handling, safety, tests, sub-lanes A0–A6 | the auto-pipeline shape, its safety gates, or where the worker runs changes |
+| `docs/plans/2026-09-24-clip-network.md` | the CLIPNET lane: three licensed-clip brands fed by Whop Content Rewards campaigns; separate from CLIPS; what selection routes are disproven; the render-worker split | the channel set, the licensing rule, or where rendering runs changes |
+| `docs/plans/2026-09-21-oss-template-extraction.md` | the OSS-TEMPLATE lane: what ships in the public template vs stays private, the positioning it leads with, the pre-publish gate, and the sync direction | the public/private split or the open-core artifact changes |
+| `docs/plans/2026-09-21-scheduler-stalls.md` | the SCHED-STALL lane: why the scheduler goes silent (the container is scaled to zero), the keepalive fix, and the worker-deployment option that was considered and deferred | the hosting's idle behaviour changes, or scheduling moves off the web app |
+| `docs/plans/2026-09-20-clips-to-social.md` | the CLIPS lane: OBS replay buffer → transforms → caption → approval → TikTok/Reels/Shorts; what is deliberately NOT auto-detected | the clip scope, its source, or its safety gates change |
+| `docs/plans/2026-09-15-job-application-agent.md` | the JOBS capability: discovery→score→tailor→approve→submit, the anti-fabrication fact base, and what is deliberately out of scope | the job-agent scope or its safety gates change |
+| `docs/plans/2026-08-28-phase1-source-to-publish.md` | the Phase-1 scope: source→publish, no ORM; what's kept vs removed; lane order | the phase scope changes (retire when the phase closes) |
+
+### Add your repo's spoke docs here
+
+As your project grows, register each contract doc in the table above with what
+it governs and its update trigger. Typical spokes: `ARCHITECTURE.md`,
+`DATA-MODEL.md`, `REPORTING.md`, `PRICING.md`, `SECURITY.md`, `UI-SYSTEM.md`.
+
+## Rules
+
+- **Amend, don't fork.** If a fact belongs in an existing doc, update it there.
+  Don't spawn a second source of truth for the same contract.
+- **Register new docs here.** A contract doc that isn't in this map is invisible
+  to the next agent. Add it the moment it's created.
+- **Meta is an aid.** Anything under `docs/_meta/*` (generated indexes,
+  embeddings, retrieval helpers) supports lookup but never overrides an owning
+  doc.
+- **The map is itself a contract.** Changing precedence or the doc set is a
+  lane like any other — write it back here.

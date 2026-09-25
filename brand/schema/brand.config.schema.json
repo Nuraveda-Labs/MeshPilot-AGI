@@ -1,0 +1,744 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://meshpilot.app/schema/brand.config.schema.json",
+  "title": "Glitch Signal brand config",
+  "type": "object",
+  "required": [
+    "brand_id",
+    "display_name",
+    "timezone"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "brand_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Stable, kebab/snake-case identifier. Must match the config filename stem (e.g. 'example' for brand/configs/example.json)."
+    },
+    "env_prefix": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]*$",
+      "description": "Env-key prefix for this project's per-brand credentials, e.g. 'ACME' -> ACME_META_APP_ID. Every capability reads secrets as <env_prefix>_<KEY>; there are no global keys."
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timezone": {
+      "type": "string",
+      "description": "IANA timezone, e.g. 'UTC', 'Asia/Kolkata'."
+    },
+    "content_source": {
+      "type": "string",
+      "enum": [
+        "ai_generated",
+        "drive_footage"
+      ],
+      "default": "ai_generated",
+      "description": "ai_generated = Kling/Runway pipeline. drive_footage = pre-edited clips from a Drive folder (drive-footage pattern)."
+    },
+    "drive_folder_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Google Drive folder ID. Required when content_source=drive_footage. The GOOGLE_DRIVE_SA_JSON service-account email must have Viewer on this folder."
+    },
+    "brand": {
+      "type": "object",
+      "description": "Visual + voice identity used by the video assembler and script writer.",
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "accent_color": {
+          "type": "string"
+        },
+        "base_color": {
+          "type": "string"
+        },
+        "secondary_color": {
+          "type": "string"
+        },
+        "watermark_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "voice": {
+          "type": "string"
+        }
+      }
+    },
+    "video_model_routing": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "phase": {
+          "type": "integer"
+        },
+        "model_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "orm_guardrails": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "hard_stop_phrases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "competitor_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "auto_respond_tiers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "review_window_seconds": {
+          "type": "object"
+        },
+        "escalate_tiers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ignore_tiers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "min_confidence_threshold": {
+          "type": "number"
+        }
+      }
+    },
+    "platforms": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "youtube": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "privacy_status": {
+              "type": "string"
+            },
+            "default_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "category_id": {
+              "type": "string"
+            }
+          }
+        },
+        "twitter": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "instagram": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "tiktok": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "open_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "daily_cap": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "default_privacy_level": {
+              "type": "string",
+              "enum": [
+                "PUBLIC_TO_EVERYONE",
+                "MUTUAL_FOLLOW_FRIENDS",
+                "FOLLOWER_OF_CREATOR",
+                "SELF_ONLY"
+              ]
+            },
+            "disable_duet": {
+              "type": "boolean"
+            },
+            "disable_stitch": {
+              "type": "boolean"
+            },
+            "disable_comment": {
+              "type": "boolean"
+            },
+            "video_cover_timestamp_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "default_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "zernio_tiktok": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Post to TikTok via Zernio (audited partner app). Use this instead of 'tiktok' until our own TikTok dev app is audited.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "account_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Zernio internal account id (field_id from client.accounts.list()), NOT the TikTok open_id."
+            },
+            "daily_cap": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "default_privacy_level": {
+              "type": "string",
+              "enum": [
+                "PUBLIC_TO_EVERYONE",
+                "MUTUAL_FOLLOW_FRIENDS",
+                "FOLLOWER_OF_CREATOR",
+                "SELF_ONLY"
+              ]
+            },
+            "disable_duet": {
+              "type": "boolean"
+            },
+            "disable_stitch": {
+              "type": "boolean"
+            },
+            "disable_comment": {
+              "type": "boolean"
+            },
+            "video_cover_timestamp_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "default_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "buffer_tiktok": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Post to TikTok via Buffer. 'channel' is the Buffer channel id for the connected TikTok account.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "channel": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Buffer channel id for the connected TikTok account."
+            },
+            "daily_cap": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "default_privacy_level": {
+              "type": "string",
+              "enum": [
+                "PUBLIC_TO_EVERYONE",
+                "MUTUAL_FOLLOW_FRIENDS",
+                "FOLLOWER_OF_CREATOR",
+                "SELF_ONLY"
+              ]
+            },
+            "disable_duet": {
+              "type": "boolean"
+            },
+            "disable_stitch": {
+              "type": "boolean"
+            },
+            "disable_comment": {
+              "type": "boolean"
+            },
+            "video_cover_timestamp_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "post_mode": {
+              "type": "string",
+              "enum": [
+                "DIRECT_POST",
+                "MEDIA_UPLOAD"
+              ]
+            },
+            "is_aigc": {
+              "type": "boolean"
+            },
+            "default_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "meta_instagram": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Post to Instagram directly via the Meta Graph API.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "media_type": {
+              "type": "string",
+              "enum": [
+                "REELS",
+                "STORIES"
+              ]
+            },
+            "share_to_feed": {
+              "type": "boolean"
+            },
+            "default_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "youtube_shorts": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Post to YouTube Shorts directly via the YouTube Data API.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "privacy_status": {
+              "type": "string",
+              "enum": [
+                "public",
+                "unlisted",
+                "private"
+              ]
+            },
+            "category_id": {
+              "type": "string"
+            },
+            "default_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "media_pipeline": {
+      "type": "object",
+      "description": "Per-platform pre-publish ffmpeg transforms. Keys are canonical platform names (tiktok, instagram, youtube \u2014 the bare targets). Values are ordered chains; the output of step N feeds step N+1. A step is either a bare transform name, or an object {\"name\": ..., ...params} when it takes parameters. Transform names must match src/meshpilot/media/ffmpeg.py::registered_transforms() \u2014 a test asserts this enum equals that registry, because the two silently drifted once already.",
+      "additionalProperties": {
+        "type": "array",
+        "description": "Ordered transform chain \u2014 outputs of step N feed step N+1.",
+        "items": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "replace_audio",
+                "strip_audio",
+                "vertical_reframe"
+              ]
+            },
+            {
+              "type": "object",
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "enum": [
+                    "replace_audio",
+                    "strip_audio",
+                    "vertical_reframe"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "caption_writer": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Controls how the drive_footage pipeline writes captions. filename = LLM reads just the Drive file name (cheap, generic). rules_based = LLM is given a parsed-filename + the brand's product catalog + a strict rules block (cheap, on-brand, no vision cost). vision = uploads the actual video bytes to Gemini 2.5 Pro for the most grounded caption (paid per clip, slower).",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "filename",
+            "rules_based",
+            "vision"
+          ],
+          "default": "filename"
+        },
+        "product_catalog_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Required for rules_based mode. Path (relative to repo root) to a markdown file listing the brand's SKUs, ingredients, and claims. Injected into the caption prompt."
+        },
+        "vision_model": {
+          "type": "string",
+          "description": "Override the default Gemini vision model (defaults to gemini-2.5-pro)."
+        },
+        "vision_fallback_to_filename": {
+          "type": "boolean",
+          "default": true,
+          "description": "If the vision call fails (API error, quota, processing timeout), fall back to filename-mode captioning so the pipeline still produces a caption rather than failing the Signal."
+        }
+      }
+    },
+    "tasks": {
+      "type": "object",
+      "description": "Per-brand task registry. Each key is a task name (video_uploader, comment_responder, metrics_report, \u2026) and the value describes its configuration + outputs. Adding a new brand or task = adding a new entry here; the code walks the registry at runtime.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "posting_rules": {
+            "type": "object",
+            "description": "Applies to video_uploader-shaped tasks. Constrains when and in what order scheduled posts may fire.",
+            "additionalProperties": true,
+            "properties": {
+              "daily_cap": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "slots_local": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^\\d{1,2}:\\d{2}$"
+                },
+                "description": "HH:MM times in the brand's timezone when posts are allowed to fire. Empty = no slot constraint."
+              },
+              "min_interval_minutes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "variant_gap": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Min posts between two files in the same variant_group (from filename parser)."
+              },
+              "product_gap": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Min posts between two files of the same product."
+              },
+              "skip_patterns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Substrings (case-insensitive). Files whose raw filename contains ANY of these are skipped."
+              },
+              "order": {
+                "type": "string",
+                "enum": [
+                  "oldest_first",
+                  "newest_first"
+                ],
+                "default": "oldest_first"
+              }
+            }
+          },
+          "outputs": {
+            "type": "object",
+            "description": "Sinks the task writes to in addition to publishing. Multiple outputs may coexist.",
+            "additionalProperties": true,
+            "properties": {
+              "google_sheet": {
+                "type": "object",
+                "properties": {
+                  "sheet_id": {
+                    "type": "string"
+                  },
+                  "worksheet": {
+                    "type": "string",
+                    "default": "Sheet1"
+                  }
+                },
+                "required": [
+                  "sheet_id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "default_hashtags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "voice_prompt_path": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Optional path (relative to repo root) to a markdown voice guide used by the caption writer."
+    },
+    "site_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "The brand's public site. Every brand has one; the SEO and ORM lanes read it."
+    },
+    "seo": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How this brand's blog is published. `git` is the repo-based publisher (typed post object + the site's own gates + a PR); `shopify` needs the Admin API publisher, which does not exist yet; `none` means the brand has no blog to publish to.",
+      "properties": {
+        "publisher": {
+          "type": "string",
+          "enum": [
+            "git",
+            "shopify",
+            "none"
+          ],
+          "description": " Optional; a brand may declare only blog_path (syndication needs no publisher)."
+        },
+        "blog_handle": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "blog_path": {
+          "type": "string",
+          "description": "Path under site_url where blog posts live; default /blog/."
+        }
+      }
+    },
+    "caption_pool": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Pre-approved brand-voice captions for drive_to_social when a filename says nothing about the video (IMG_1234, 11, copy_<uuid>). Picked deterministically per file. No scene, no product-use narration, no claims."
+    },
+    "offpage": {
+      "type": "object",
+      "description": "Off-page SEO levers (design docs/plans/2026-09-12-offpage-seo.md). All optional.",
+      "properties": {
+        "audience_queries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "brand_terms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "product_line": {
+          "type": "string",
+          "description": "The one sentence the agent may say about the product when a thread asks for a tool."
+        },
+        "forbidden_phrases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reply": {
+          "type": "object",
+          "properties": {
+            "daily_candidates": {
+              "type": "integer"
+            },
+            "min_gap_hours": {
+              "type": "integer"
+            },
+            "max_age_hours": {
+              "type": "integer"
+            },
+            "offer_ttl_hours": {
+              "type": "integer"
+            },
+            "reddit_username": {
+              "type": "string"
+            }
+          }
+        },
+        "approvals_channel_id": {
+          "type": "string"
+        },
+        "approvers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Discord user ids whose reactions count."
+        },
+        "tracked_prompts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expertise": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "haro": {
+          "type": "object",
+          "properties": {
+            "byline": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "jobs": {
+      "type": "object",
+      "description": "JOBS capability \u2014 the job-application agent (design docs/plans/2026-09-15-job-application-agent.md). All optional; the capability itself is gated by agent_jobs_enabled.",
+      "additionalProperties": true,
+      "properties": {
+        "approvals_channel_id": {
+          "type": "string",
+          "description": "Discord channel for approval cards. One card per application (operator decision 3)."
+        },
+        "approvers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Discord user ids whose reactions count. Nobody else's does."
+        },
+        "offer_ttl_hours": {
+          "type": "integer",
+          "description": "Card lifetime. Expiry is NOT an approval \u2014 an aged-out card is skipped, never auto-sent."
+        },
+        "max_applications_per_day": {
+          "type": "integer",
+          "description": "Per-brand/day submission cap. Operator decision 1: 3."
+        },
+        "min_score": {
+          "type": "number",
+          "description": "Below this a role is skipped outright and never offered. Operator decision 2: 4.0."
+        },
+        "track": {
+          "type": "string"
+        },
+        "target_titles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude_titles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "work_authorization": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "authorized_in": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "needs_sponsorship_outside": {
+              "type": "boolean"
+            },
+            "note": {
+              "type": "string"
+            }
+          }
+        },
+        "locations": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "compensation": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "sources": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Per-source enable flags. Authenticated scraping of LinkedIn/Indeed is deliberately absent \u2014 see design \u00a7 4."
+        },
+        "submission": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Operator decision 4: free_text_answers is always manual_required. The agent never composes a screening answer."
+        }
+      }
+    }
+  },
+  "patternProperties": {
+    "^_": {
+      "description": "Comment key \u2014 ignored by the loader, used for inline documentation."
+    }
+  }
+}

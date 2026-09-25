@@ -1,0 +1,306 @@
+"""Deterministic design-as-code image renderer (GROW-SOCIAL-RENDER-2).
+
+The problem: diffusion image models (gpt-image-2, Ideogram, Flux, ...)
+render what text *looks like*, not what it *says* — so headlines and
+numbers come out garbled ("Same cat $100k" instead of "cap", scrambled
+axis labels). For anything that must show exact copy or figures, that is
+disqualifying.
+
+The fix (the consensus production pattern, e.g. SuperDesign): generate
+the design as HTML/CSS with the copy as REAL text, then render to PNG
+with headless Chrome. Text is pixel-perfect because it is actual
+rendered type, fully brand-controlled, deterministic, and free.
+
+Diffusion stays the right tool for photoreal / illustrative backgrounds
+(see media/image_gen.py) — this module owns the text-accurate surface:
+stat cards, comparison tables, quote cards, hook cards.
+
+No new Python deps: shells out to an installed Chrome/Chromium with
+`--headless --screenshot`. Brand look is resolved per-brand (Mesh Pilot
+is multi-tenant; an unknown client gets a neutral default, never another
+tenant's theme). Output matches image_gen.py: a PNG under
+`{video_storage_path}/images/{brand_id}/`.
+"""
+from __future__ import annotations
+
+import html as _html
+import pathlib
+import shutil
+import subprocess
+import tempfile
+import uuid
+from dataclasses import dataclass, field
+from typing import Literal
+
+import structlog
+
+log = structlog.get_logger(__name__)
+
+AspectRatio = Literal["1:1", "4:5", "16:9", "9:16"]
+
+# Logical card dimensions per aspect (Chrome renders at 2x for crispness).
+_DIMS: dict[str, tuple[int, int]] = {
+    "1:1": (1080, 1080),
+    "4:5": (1080, 1350),
+    "16:9": (1600, 900),
+    "9:16": (1080, 1920),
+}
+
+# Linux container paths first (that is where this runs in prod), then macOS and Playwright's
+# cache so the same code renders on a developer machine. Additive only — a Linux box resolves
+# exactly as before; without the macOS entries every render raised HtmlRenderError locally, which
+# made the whole design-as-code path untestable off a container.
+_CHROME_CANDIDATES = (
+    "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+    "/snap/bin/chromium", "/usr/bin/google-chrome", "/usr/bin/chromium-browser",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+)
+
+
+def _playwright_chromium() -> str | None:
+    """Playwright's cached Chromium, if a local install put one there.
+
+    `chrome-headless-shell` is preferred over a full Chromium/Chrome app: it is purpose-built for
+    exactly this (screenshot / print-to-pdf) and starts immediately, whereas macOS's full
+    `Google Chrome.app` with `--headless=new` was measured HANGING until the 120s timeout even with
+    an isolated `--user-data-dir`.
+
+    ⚠️ **`PLAYWRIGHT_BROWSERS_PATH` is honoured, and that is not optional.** Playwright's own Docker
+    image installs browsers to `/ms-playwright`, NOT to `~/.cache/ms-playwright` — so searching only
+    the home cache found nothing inside the one container built specifically to have a browser. The
+    job submitter failed every pass with "no Chrome/Chromium binary found (… and the Playwright
+    cache)" while Chromium sat on disk the whole time (observed live 2026-09-16, Railway).
+    """
+    import glob
+    import os
+
+    roots = []
+    if env_root := os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+        # "0" is Playwright's "install next to the package" sentinel, not a path.
+        if env_root != "0":
+            roots.append(env_root)
+    roots += ["/ms-playwright",                          # the official image's default
+              "~/Library/Caches/ms-playwright",          # macOS
+              "~/.cache/ms-playwright"]                  # Linux, local installs
+
+    # Relative to each root. headless shell first: it is purpose-built for print-to-pdf.
+    # ⚠️ The headless shell is named DIFFERENTLY per platform, and assuming the macOS spelling on
+    # Linux is what kept the submitter on full Chromium for two days. Verified 2026-09-19 by
+    # unzipping the actual artifact:
+    #     linux  chromium_headless_shell-<rev>/chrome-linux/headless_shell
+    #     macOS  chromium_headless_shell-<rev>/chrome-headless-shell-mac-<arch>/chrome-headless-shell
+    # Note `chrome-linux/` is the same directory name full Chromium uses — only the PARENT
+    # (`chromium_headless_shell-*` vs `chromium-*`) and the binary name distinguish them.
+    rels = (
+        "chromium_headless_shell-*/chrome-linux/headless_shell",
+        "chromium_headless_shell-*/chrome-headless-shell-mac-*/chrome-headless-shell",
+        "chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell",
+        "chromium_headless_shell-*/chrome-linux*/chrome-headless-shell",
+        "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        "chromium-*/chrome-linux/chrome",
+        "chromium-*/chrome-linux64/chrome",
+    )
+    for rel in rels:                       # preference is by BINARY KIND, then by root
+        for root in roots:
+            base = pathlib.Path(root).expanduser()
+            hits = sorted(h for h in glob.glob((base / rel).as_posix()) if os.access(h, os.X_OK))
+            if hits:
+                return hits[-1]
+    return None
+
+
+class HtmlRenderError(RuntimeError):
+    """Raised when no Chrome binary is found or the screenshot fails."""
+
+
+@dataclass(frozen=True)
+class Theme:
+    bg: str = "#15171a"
+    fg: str = "#e8eef2"
+    muted: str = "#9fb0bd"
+    accent: str = "#2dd4bf"
+    font: str = "Arial, Helvetica, sans-serif"
+
+
+# ONE theme for every brand. The per-brand map is GONE (operator decision, 2026-09-23):
+# MeshPilot is multi-tenant, and a dict keyed on one customer's id is the product carrying a
+# client's identity in its source.
+#
+# ⚠️ This is a DELIBERATE visible change, not a no-op. One brand was mapped to `Theme()`
+# whose accent is `#2dd4bf`; it now renders the neutral `#6366f1` like everyone else. Two
+# alternatives were measured and declined: reusing the config's `accent_color` would have made
+# that brand's cards `#00ff88` (a DIFFERENT change, since `accent_color` and `Theme.accent` are
+# separate colour systems today — `accent_color` feeds quote_card/carousel_gen only), and a new
+# `card_accent` field defaulting to `#2dd4bf` would have preserved the look at the cost of a
+# schema field. The call was to drop the special case outright.
+#
+# `theme_for` stays as the seam: callers already pass a brand_id, so making themes config-driven
+# later is a change here and nowhere else.
+_DEFAULT_THEME = Theme(accent="#6366f1")
+
+
+def theme_for(brand_id: str) -> Theme:  # noqa: ARG001 — brand_id kept as the config-driven seam
+    return _DEFAULT_THEME
+
+
+@dataclass
+class CardSpec:
+    """Structured, text-accurate card content. Every field is real text."""
+    headline: str
+    eyebrow: str = ""
+    subhead: str = ""
+    # Optional 2-column comparison rows: [{"label","a","b"}] with a/b headers.
+    rows: list[dict[str, str]] = field(default_factory=list)
+    col_a: str = ""
+    col_b: str = ""
+    # Optional simple bullet list (used when `rows` is empty).
+    bullets: list[str] = field(default_factory=list)
+    footer: str = ""
+
+
+def _esc(s: str) -> str:
+    return _html.escape(s or "", quote=True)
+
+
+def build_card_html(spec: CardSpec, theme: Theme, width: int, height: int) -> str:
+    """Pure: turn a CardSpec + theme into a self-contained HTML string.
+
+    Inline CSS only (no CDN) so rendering is deterministic and offline.
+    """
+    blocks: list[str] = []
+    if spec.eyebrow:
+        blocks.append(f'<div class="ey">{_esc(spec.eyebrow)}</div>')
+    blocks.append(f'<h1 class="h">{_esc(spec.headline)}</h1>')
+    if spec.subhead:
+        blocks.append(f'<div class="s">{_esc(spec.subhead)}</div>')
+
+    if spec.rows:
+        head = ""
+        if spec.col_a or spec.col_b:
+            head = (
+                '<tr><th></th>'
+                f'<th>{_esc(spec.col_a)}</th><th>{_esc(spec.col_b)}</th></tr>'
+            )
+        body = "".join(
+            f'<tr><td class="lbl">{_esc(r.get("label",""))}</td>'
+            f'<td>{_esc(r.get("a",""))}</td><td>{_esc(r.get("b",""))}</td></tr>'
+            for r in spec.rows
+        )
+        blocks.append(f'<table class="cmp">{head}{body}</table>')
+    elif spec.bullets:
+        items = "".join(f"<li>{_esc(b)}</li>" for b in spec.bullets)
+        blocks.append(f'<ul class="bl">{items}</ul>')
+
+    if spec.footer:
+        blocks.append(f'<div class="ft">{_esc(spec.footer)}</div>')
+
+    body_html = "\n".join(blocks)
+    return f"""<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{{margin:0;padding:0}}
+.card{{width:{width}px;height:{height}px;background:{theme.bg};color:{theme.fg};
+font-family:{theme.font};box-sizing:border-box;padding:90px;display:flex;
+flex-direction:column;justify-content:center;overflow:hidden}}
+.ey{{color:{theme.accent};font-size:30px;font-weight:700;letter-spacing:3px;
+text-transform:uppercase;margin-bottom:18px}}
+.h{{font-size:84px;font-weight:800;line-height:1.04;margin:0}}
+.s{{font-size:38px;color:{theme.muted};margin-top:26px;line-height:1.3}}
+.cmp{{margin-top:46px;border-collapse:collapse;width:100%;font-size:34px}}
+.cmp th{{color:{theme.muted};text-align:left;font-weight:600;padding:10px 18px;font-size:28px}}
+.cmp td{{padding:14px 18px;border-top:2px solid rgba(255,255,255,.08)}}
+.cmp .lbl{{color:{theme.muted}}}
+.cmp td:nth-child(2),.cmp th:nth-child(2){{color:{theme.accent};font-weight:700}}
+.bl{{margin-top:36px;padding-left:0;list-style:none;font-size:36px;line-height:1.6}}
+.bl li{{padding-left:42px;position:relative}}
+.bl li:before{{content:"";position:absolute;left:0;top:18px;width:18px;height:4px;
+background:{theme.accent}}}
+.ft{{margin-top:auto;padding-top:40px;color:{theme.muted};font-size:28px;letter-spacing:1px}}
+</style></head><body><div class="card">
+{body_html}
+</div></body></html>"""
+
+
+def _chrome_bin() -> str:
+    # A Linux container resolves here first and behaves exactly as before.
+    for c in _CHROME_CANDIDATES:
+        if not c.startswith("/Applications/") and (shutil.which(c) or pathlib.Path(c).exists()):
+            return c
+    # Then Playwright's headless shell — preferred over a desktop Chrome app, which hangs headless.
+    pw = _playwright_chromium()
+    if pw:
+        return pw
+    for c in _CHROME_CANDIDATES:
+        if pathlib.Path(c).exists():
+            return c
+    raise HtmlRenderError(
+        f"no Chrome/Chromium binary found (tried {_CHROME_CANDIDATES} and the Playwright cache)"
+    )
+
+
+def render_html_to_png(
+    html_str: str,
+    out_path: pathlib.Path,
+    width: int,
+    height: int,
+    scale: int = 2,
+) -> pathlib.Path:
+    """Render an HTML string to a PNG via headless Chrome. Returns out_path."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    chrome = _chrome_bin()
+    with tempfile.TemporaryDirectory() as td:
+        html_path = pathlib.Path(td) / "card.html"
+        html_path.write_text(html_str, encoding="utf-8")
+        # Unique --user-data-dir per invocation: without it concurrent headless
+        # Chrome runs contend on a singleton profile lock and hang (observed:
+        # 120s timeout). Isolating the profile makes renders independent.
+        profile_dir = pathlib.Path(td) / "profile"
+        cmd = [
+            chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+            "--hide-scrollbars", "--default-background-color=00000000",
+            "--no-first-run", "--no-default-browser-check", "--disable-extensions",
+            f"--user-data-dir={profile_dir}",
+            f"--force-device-scale-factor={scale}",
+            f"--window-size={width},{height}",
+            f"--screenshot={out_path}",
+            html_path.as_uri(),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            raise HtmlRenderError(
+                f"chrome screenshot produced no file (rc={proc.returncode}): "
+                f"{(proc.stderr or proc.stdout)[:300]}"
+            )
+    log.info("html_render.png", path=str(out_path), bytes=out_path.stat().st_size,
+             dims=f"{width}x{height}@{scale}x")
+    return out_path
+
+
+def render_card(
+    spec: CardSpec,
+    brand_id: str,
+    aspect: AspectRatio = "16:9",
+    out_dir: pathlib.Path | None = None,
+) -> pathlib.Path:
+    """Build + render a text-accurate card for a brand. Returns the PNG path.
+
+    Honors DISPATCH_MODE=dry_run (returns a non-existent placeholder path,
+    matching media/image_gen.py's contract) and writes under
+    {video_storage_path}/images/{brand_id}/ otherwise.
+    """
+    width, height = _DIMS.get(aspect, _DIMS["16:9"])
+    theme = theme_for(brand_id)
+    html_str = build_card_html(spec, theme, width, height)
+
+    if out_dir is None:
+        # Lazy import so build_card_html/render_html_to_png stay usable
+        # (and unit-testable) without the meshpilot config env.
+        from meshpilot.config import settings
+
+        s = settings()
+        if getattr(s, "is_dry_run", False):
+            log.info("html_render.dry_run", brand_id=brand_id, headline=spec.headline[:60])
+            return pathlib.Path(f"/tmp/dry-run-card-{uuid.uuid4().hex[:8]}.png")
+        out_dir = pathlib.Path(s.video_storage_path) / "images" / brand_id
+
+    out_path = pathlib.Path(out_dir) / f"{uuid.uuid4().hex}.png"
+    return render_html_to_png(html_str, out_path, width, height)

@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Environment — never commit
+.env
+*.env
+
+# Credentials — never commit
+credentials/
+*.json.credentials
+youtube_token.json
+
+# Brand configs (private — real values live on the deployed box only).
+# The `brand/` dir is ALSO the working tree of a nested private git repo
+# (glitch-grow-ai-social-media-agent-private). Its README.md and .gitignore
+# are owned by that private repo and must NOT be tracked by this one.
+brand.config.json
+brand/configs/*.json
+!brand/configs/.gitkeep
+# ⚠️ The ONE config that must be tracked. Every real brand config is ignored
+# (they carry live env prefixes, handles and a customer's offer), but the
+# template is useless without a working example — a stranger has nothing to
+# run the agent against. This file is fictional by construction and the
+# pre-publish gate asserts it stays that way.
+!brand/configs/example.json
+brand/prompts/*.md
+!brand/prompts/.gitkeep
+brand/audio/*
+!brand/audio/.gitkeep
+!brand/audio/README.md
+brand/README.md
+brand/.gitignore
+
+# Generated videos — large binary files
+/var/lib/meshpilot/
+*.mp4
+*.mov
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Alembic
+alembic/versions/*.pyc
+.claude/
+brand/personas/
+brand/influencer.json
+
+# CodeGraph — local per-machine index, not for committing
+.codegraph/
+# Backups of .env are still .env — `.env` alone does not match `.env.bak-20260917203443`,
+# and a `git add -A` swept one into a commit against this PUBLIC repo on 2026-09-17. GitHub's
+# push protection rejected it (8 live secrets: Supabase, Google OAuth, Anthropic, Apify…) so
+# nothing reached the remote — but the guard should be the ignore rule, not the remote.
+.env.bak*
+.env.*.bak
+*.bak

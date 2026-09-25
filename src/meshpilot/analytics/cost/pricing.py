@@ -1,0 +1,196 @@
+"""Price book — converts vendor usage into an estimated USD cost.
+
+Prices change, so everything here is a CONFIG-DRIVEN DEFAULT, overridable via env. These are
+estimates; INC-2's balance-delta reconciliation validates them against each vendor's real bill.
+
+    COST_ANTHROPIC_PRICES   JSON {model: {input, output, cache_read, cache_write}} per **1M tokens**
+    COST_HIGGSFIELD_CREDIT_USD   USD per Higgsfield credit
+    COST_HIGGSFIELD_MODEL_CREDITS  JSON {slug: base_credits} (from GET /models)
+"""
+from __future__ import annotations
+
+import json
+import os
+
+# ── Anthropic (USD per 1M tokens). Verified vs platform.claude.com/pricing 2026-08-30.
+#    cache_read = 0.1× input; cache_write = 1.25× input (5-minute TTL). Edit via env. ──
+_ANTHROPIC_DEFAULT = {
+    "claude-haiku-4-5-20251001": {"input": 1.0, "output": 5.0, "cache_read": 0.10, "cache_write": 1.25},
+    "claude-sonnet-5": {"input": 2.0, "output": 10.0, "cache_read": 0.20, "cache_write": 2.50},
+    "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-fable-5": {"input": 10.0, "output": 50.0, "cache_read": 1.0, "cache_write": 12.50},
+}
+
+
+def _anthropic_prices() -> dict:
+    raw = os.environ.get("COST_ANTHROPIC_PRICES")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:  # noqa: BLE001
+            pass
+    return _ANTHROPIC_DEFAULT
+
+
+def _web_search_usd() -> float:
+    """USD per web_search request ($10 / 1,000 = 0.01). web_fetch is free."""
+    try:
+        return float(os.environ.get("COST_ANTHROPIC_WEB_SEARCH_USD", "0.01"))
+    except ValueError:
+        return 0.01
+
+
+def anthropic_cost(model: str, usage: dict) -> float | None:
+    """usage = Anthropic response `usage` (input/output tokens, cache tokens, server_tool_use).
+
+    Returns None when `model` has no entry in the price book — the book only holds Claude models
+    (#194), so a router-selected non-Anthropic fallback (glm/kimi/deepseek/gpt/…) must not be
+    silently priced at an arbitrary Claude tier. Callers should treat None as "unknown", not $0.
+    """
+    prices = _anthropic_prices()
+    p = prices.get(model)
+    if p is None:
+        return None
+    it = float(usage.get("input_tokens", 0) or 0)
+    ot = float(usage.get("output_tokens", 0) or 0)
+    cr = float(usage.get("cache_read_input_tokens", 0) or 0)
+    cw = float(usage.get("cache_creation_input_tokens", 0) or 0)
+    ws = float((usage.get("server_tool_use") or {}).get("web_search_requests", 0) or 0)
+    per_m = 1_000_000.0
+    return round(
+        it * p.get("input", 0) / per_m
+        + ot * p.get("output", 0) / per_m
+        + cr * p.get("cache_read", p.get("input", 0)) / per_m
+        + cw * p.get("cache_write", p.get("input", 0)) / per_m
+        + ws * _web_search_usd(),   # server-side web_search ($10/1k); web_fetch is free
+        6,
+    )
+
+
+# ── Higgsfield (credit-based). base_credits per model × USD/credit. ──
+_HIGGSFIELD_CREDITS_DEFAULT = {
+    "higgsfield-ai/soul/v2/standard": 0.0,
+    "higgsfield-ai/soul/cinema": 0.0,
+    "higgsfield-ai/popcorn/auto": 0.0,
+    "higgsfield-ai/dop/lite/first-last-frame": 2.0,
+    "higgsfield-ai/dop/standard": 9.0,
+    "higgsfield-ai/dop/standard/first-last-frame": 9.0,
+    "higgsfield-ai/dop/turbo": 6.5,
+    "higgsfield-ai/dop/turbo/first-last-frame": 6.5,
+}
+
+
+def _higgsfield_credit_usd() -> float:
+    try:
+        return float(os.environ.get("COST_HIGGSFIELD_CREDIT_USD", "0.01"))
+    except ValueError:
+        return 0.01
+
+
+def _higgsfield_model_credits() -> dict:
+    raw = os.environ.get("COST_HIGGSFIELD_MODEL_CREDITS")
+    if raw:
+        try:
+            return {**_HIGGSFIELD_CREDITS_DEFAULT, **json.loads(raw)}
+        except Exception:  # noqa: BLE001
+            pass
+    return _HIGGSFIELD_CREDITS_DEFAULT
+
+
+def higgsfield_cost(model: str, *, base_credits: float | None = None) -> tuple[float, float]:
+    """Return (credits, cost_usd). Prefer a vendor-reported base_credits, else the price book."""
+    credits = base_credits if base_credits is not None else _higgsfield_model_credits().get(model, 0.0)
+    return round(float(credits), 4), round(float(credits) * _higgsfield_credit_usd(), 6)
+
+
+# ── MUapi (655 models, credit-based, no per-call cost in the response) ──
+# A per-model price book for 655 slugs is infeasible; per-call cost here is a COARSE estimate and
+# the MUapi balance-delta reconciliation (INC-2) is the source of truth. Overridable per env.
+def _muapi_default_usd() -> float:
+    """Per-call estimate, calibrated against a real balance delta rather than guessed.
+
+    0.9699 USD of balance consumed over 24 generations = ~0.040 per call. The previous 0.02 was
+    HALF the true cost, so the daily cap was permitting roughly twice the spend it was configured
+    for — the dangerous direction of wrong, not the safe one.
+
+    Still a flat average across models: nano-banana-pro and gemini-flash almost certainly differ,
+    but one reconciliation window cannot separate them. Per-model figures belong in
+    COST_MUAPI_MODEL_USD once there is enough per-model history to attribute the delta.
+    """
+    try:
+        return float(os.environ.get("COST_MUAPI_DEFAULT_USD", "0.04"))
+    except ValueError:
+        return 0.04
+
+
+def unknown_model_cost_usd() -> float:
+    """Conservative flat estimate for a model missing from the price book (not a Claude tier — #194).
+
+    `anthropic_cost()` returns None for such a model so callers don't guess a vendor's price tier;
+    but recording $0.0 for a real paid call makes it look free to the daily-budget check and cost
+    reconciliation (usage_events.cost_usd), which can burn budget invisibly. Callers should record
+    this instead of 0.0, and should still mark the row `estimated=True` (record_usage's default)."""
+    try:
+        return float(os.environ.get("COST_UNKNOWN_MODEL_USD", "0.05"))
+    except ValueError:
+        return 0.05
+
+
+def muapi_cost(model: str) -> float:
+    """Coarse per-call estimate for a MUapi generation (trued up by balance-delta reconciliation).
+
+    Optional per-model overrides via COST_MUAPI_MODEL_USD (JSON {slug: usd})."""
+    raw = os.environ.get("COST_MUAPI_MODEL_USD")
+    if raw:
+        try:
+            book = json.loads(raw)
+            if model in book:
+                return round(float(book[model]), 6)
+        except Exception:  # noqa: BLE001
+            pass
+    return round(_muapi_default_usd(), 6)
+
+
+# ── HeyGen (credit-based; ~1 credit per API video by default) ──
+def heygen_credit_usd() -> float:
+    """USD per HeyGen credit — **$0.065**, derived from the actual plan (operator, 2026-09-02).
+
+    The subscription costs **$39/month** and grants **600 credits/month**, so 39/600 = $0.065.
+    (Rollover carries unused credits forward but does not change the marginal rate.)
+
+    This defaulted to 0.30, a pay-as-you-go assumption that priced a single 30s render at $7.80 and
+    implied ~$180/month of value in a $39 plan. At the corrected rate the measured 26 credits/render
+    comes to **~$1.69 per video** — which independently matches the v1 monorepo UGC lane's own
+    figure of "~$1-2 per ad" after 22 iterations.
+    """
+    try:
+        return float(os.environ.get("COST_HEYGEN_CREDIT_USD", "0.065"))
+    except ValueError:
+        return 0.065
+
+
+def heygen_cost(model: str, *, credits: float | None = None) -> tuple[float, float]:
+    """Return (credits, cost_usd). Defaults to a MEASURED 26 credits/video.
+
+    It defaulted to 1, understating every Video Agent render 26x. The account's own usage history
+    prices "Acme Corp: The Payout Truth" (~38s) at **26 credits** -- same class of error as
+    the MUapi unit mistake above, found the same way: by reading the vendor's own billing screen
+    instead of trusting the constant.
+    """
+    c = credits if credits is not None else float(os.environ.get("COST_HEYGEN_DEFAULT_CREDITS", "26") or 26)
+    return round(float(c), 4), round(float(c) * heygen_credit_usd(), 6)
+
+
+def muapi_credit_usd() -> float:
+    """USD per unit of MUapi's reported balance — which is DENOMINATED IN DOLLARS, so 1.0.
+
+    This defaulted to 0.01 on the assumption that the balance was credits like HeyGen's. It is not,
+    and the error manufactured a 46x "drift" in reconciliation: 24 generations were reported as
+    $0.0097 of real spend, i.e. four hundredths of a cent per image, which is not a plausible price
+    for nano-banana or Gemini image generation. Measured against the real balance drop
+    (6.4324 -> 5.4625 across 24 calls) the true figure is ~$0.040 per call.
+    """
+    try:
+        return float(os.environ.get("COST_MUAPI_CREDIT_USD", "1.0"))
+    except ValueError:
+        return 1.0

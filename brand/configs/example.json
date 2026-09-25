@@ -1,0 +1,94 @@
+{
+  "_README": [
+    "A COMPLETE, FICTIONAL brand. Copy this file to brand/configs/<your_id>.json",
+    "and edit it — the filename stem MUST equal brand_id or the agent refuses to",
+    "start (config.py raises rather than guessing which one you meant).",
+    "",
+    "The one idea to take from this file: EVERY credential resolves as",
+    "<env_prefix>_<KEY>. Nothing is global. With env_prefix 'ACME' below, the",
+    "agent reads ACME_META_APP_ID, ACME_BUFFER_API_KEY, ACME_JOBS_AUTH_TOKEN.",
+    "Add a second brand with env_prefix 'BETA' and it reads BETA_* instead —",
+    "it is structurally incapable of reaching this brand's credentials, because",
+    "it never builds their names.",
+    "",
+    "That is the whole multi-tenant story, and it is enforced by construction",
+    "rather than by a permission check somebody can forget to write."
+  ],
+
+  "brand_id": "example",
+  "display_name": "Acme Supply Co.",
+  "env_prefix": "ACME",
+  "timezone": "UTC",
+
+  "content_source": "ai_generated",
+
+  "brand": {
+    "name": "Acme Supply Co.",
+    "accent_color": "#4ADE80",
+    "base_color": "#0B0E14",
+    "voice": "Plain and specific. Short sentences. Names the trade-off instead of claiming there isn't one. Never superlatives, never 'revolutionary', never an exclamation mark."
+  },
+
+  "default_hashtags": ["acmesupply", "workshop", "tools"],
+
+  "site_url": "https://example.com",
+  "seo": { "blog_path": "/blog/" },
+
+  "platforms": {
+    "youtube": {
+      "enabled": false,
+      "privacy_status": "private",
+      "default_tags": ["acme", "workshop"],
+      "category_id": "26"
+    }
+  },
+
+  "_media_pipeline_note": [
+    "Per-platform ffmpeg transforms, applied before publishing. Registered",
+    "transforms: strip_audio, replace_audio, vertical_reframe.",
+    "",
+    "The example below is REAL and runnable: TikTok gets a 9:16 reframe of a",
+    "landscape source. `strip_audio` exists because a Content-ID match mutes a",
+    "video on TikTok's web player, and a silent upload is watched fine.",
+    "",
+    "An empty list means 'publish the file as-is' — it is not the same as",
+    "omitting the platform, which also means as-is but says nothing about",
+    "whether you considered it."
+  ],
+  "media_pipeline": {
+    "tiktok": [
+      { "name": "vertical_reframe", "blur": 20, "dim": -0.12 }
+    ],
+    "instagram": [],
+    "youtube": []
+  },
+
+  "orm_guardrails": {
+    "_note": "Reputation replies are drafted, never posted, unless you turn agent_publish_enabled on. These bound what the agent may SAY even then.",
+    "hard_stop_phrases": [
+      "guaranteed",
+      "risk-free",
+      "best in the world"
+    ],
+    "competitor_names": [],
+    "auto_respond_tiers": ["positive"],
+    "escalate_tiers": ["negative_severe", "legal"],
+    "ignore_tiers": ["spam"],
+    "min_confidence_threshold": 0.8
+  },
+
+  "offpage": {
+    "_note": "brand_terms are what the agent LISTENS for when finding mentions. Get them wrong and it monitors the wrong company — so they are the brand's real names, not marketing copy.",
+    "brand_terms": ["Acme Supply", "AcmeSupply"],
+    "product_line": "Acme Supply Co. — hand tools for people who use them daily. Fewer models, better steel, sold without a subscription.",
+    "audience_queries": [
+      "best hand tools for daily use",
+      "how to choose a chisel"
+    ],
+    "forbidden_phrases": ["lifetime guarantee"],
+    "reply": {
+      "daily_candidates": 3,
+      "min_gap_hours": 20
+    }
+  }
+}

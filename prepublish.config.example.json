@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "Copy to prepublish.config.json and fill in YOUR names, then run:",
+    "    uv run python scripts/prepublish_gate.py",
+    "",
+    "The gate REFUSES TO RUN without prepublish.config.json rather than scanning with these",
+    "placeholders. A gate that reads clean because nobody configured it is worse than no gate:",
+    "it produces a confident PASS over a repo nobody checked. That failure mode has cost this",
+    "project real time, which is why it fails loudly instead.",
+    "",
+    "Universal rules live in the script itself and need no configuration: vendor credential",
+    "shapes (sk-, ghp_, xox*-, EAA\u2026, re_, PEM blocks) and hosting identifiers (Supabase project",
+    "refs, *.fastapicloud.dev origins). What you declare here is what is specific to YOU.",
+    "",
+    "Patterns are Python regex, matched case-INSENSITIVELY.",
+    "\u26a0\ufe0f Use a LEADING \\b but NOT a trailing one on names: `_` is a word character, so",
+    "`\\bacme\\b` does NOT match `acme_prod` \u2014 and a brand id with a suffix is exactly the",
+    "spelling that slips through. Measured here, not theorised.",
+    "",
+    "\u26a0\ufe0f These placeholders deliberately do NOT include the bundled Acme example brand.",
+    "Acme IS the template's public example \u2014 declaring it protected makes a fresh clone fail",
+    "with 88 findings on its own documentation, which teaches a new user that the gate cries",
+    "wolf. Measured on 2026-09-24 by doing exactly that. Replace these with YOUR names and the",
+    "gate goes from passing-because-empty to actually guarding something.",
+    "",
+    "no_ship_files: individual files inside a shipping directory that must NOT ship \u2014",
+    "e.g. your own persona or brand examples sitting beside the generic one. They stay",
+    "TRACKED, so the advisory keeps listing them: excluded from the export, never invisible."
+  ],
+  "attribution_org": "Your-GitHub-Org",
+  "brands": [
+    [
+      "\\byourbrand",
+      "REPLACE ME \u2014 your brand id / name"
+    ],
+    [
+      "\\byourbrand\\.com",
+      "REPLACE ME \u2014 your brand domain"
+    ]
+  ],
+  "prefixes": [
+    [
+      "\\bYOURCO_[A-Z][A-Z0-9_]*",
+      "REPLACE ME \u2014 your live env prefix"
+    ]
+  ],
+  "people": [
+    [
+      "\\byour name here",
+      "REPLACE ME \u2014 operator / persona names"
+    ]
+  ],
+  "identifiers": [
+    [
+      "\\byour-cloud-team\\b",
+      "REPLACE ME \u2014 hosting team / account name"
+    ]
+  ],
+  "no_ship_files": []
+}

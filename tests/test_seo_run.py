@@ -1,0 +1,278 @@
+"""SEO-4 — the scheduled loop. It refuses more often than it runs, and that is the design."""
+from __future__ import annotations
+
+import pathlib
+
+import pytest
+
+from meshpilot.agent.cron import capabilities as caps
+from meshpilot.agent.seo import run
+
+SITEMAP = """<?xml version="1.0"?><urlset>
+  <url><loc>https://example.com</loc></url>
+  <url><loc>https://example.com/tools/firm-drawdown-calculator</loc></url>
+  <url><loc>https://example.com/prop-firms/apex</loc></url>
+</urlset>"""
+
+BLOG = """export const blog: BlogPost[] = [
+  { slug: 'trailing-drawdown-explained', title: 'Trailing drawdown, explained' },
+]"""
+
+
+@pytest.fixture
+def repo(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "public").mkdir()
+    (tmp_path / "src" / "data").mkdir(parents=True)
+    (tmp_path / "public/sitemap-en.xml").write_text(SITEMAP)
+    (tmp_path / "src/data/blog.ts").write_text(BLOG)
+    return str(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _on(monkeypatch):
+    monkeypatch.setattr(run, "_enabled", lambda: True)
+    monkeypatch.setattr(run, "_cfg", lambda b, n, d="": d)
+    monkeypatch.setattr("meshpilot.agent.positioning.get", lambda *a, **k: _wrap(""))
+
+
+# ── reading the site, rather than guessing at it ──
+def test_site_links_come_from_the_sites_own_sitemap(repo):
+    """Not a guess and not a model's memory: the paths the site actually serves."""
+    assert run.site_links(repo) == ["/", "/tools/firm-drawdown-calculator", "/prop-firms/apex"]
+
+
+def test_a_missing_sitemap_reads_as_no_vocabulary(tmp_path):
+    assert run.site_links(str(tmp_path)) == []
+
+
+def test_existing_posts_are_read_so_a_topic_is_not_repeated(repo):
+    slugs, titles = run.existing_posts(repo)
+    assert slugs == ["trailing-drawdown-explained"]
+    assert titles == ["Trailing drawdown, explained"]
+
+
+# ── the refusals, each with its own named reason ──
+async def test_the_kill_switch_refuses_before_anything_is_authored(monkeypatch, repo):
+    monkeypatch.setattr(run, "_enabled", lambda: False)
+    assert (await run.run_publish("b", {"repo": repo}))["skipped"] == "seo_disabled"
+
+
+async def test_no_checkout_refuses_rather_than_failing_mid_git(tmp_path):
+    """The expected outcome on the API's own runtime, which has no repo, no npm and no gh."""
+    res = await run.run_publish("b", {"repo": str(tmp_path)})
+    assert res["skipped"] == "no_repo"
+
+
+async def test_a_repo_without_a_sitemap_refuses_rather_than_inventing_links(tmp_path):
+    """Authoring with no link vocabulary is exactly what produced invented internal paths the first
+    time. Refusing is better than a post full of plausible 404s."""
+    (tmp_path / ".git").mkdir()
+    res = await run.run_publish("b", {"repo": str(tmp_path)})
+    assert res["skipped"] == "no_sitemap"
+
+
+async def test_an_empty_topic_stops_the_run(monkeypatch, repo):
+    async def _none(*a, **k):
+        return ""
+
+    monkeypatch.setattr("meshpilot.agent.seo.track.unsettled", lambda *a, **k: _wrap([]))
+    monkeypatch.setattr(run, "pick_topic", _none)
+    res = await run.run_publish("b", {"repo": repo})
+    assert res["skipped"] == "no_topic"
+
+
+# ── the happy path, and the one duplicate guard that matters ──
+class _Post:
+    slug, title = "new-post", "New post"
+
+
+async def _author_ok(*a, **k):
+    return _Post(), []
+
+
+async def test_a_duplicate_slug_is_named_rather_than_left_to_git(monkeypatch, repo):
+    class _Dupe:
+        slug, title = "trailing-drawdown-explained", "x"
+
+    monkeypatch.setattr("meshpilot.agent.seo.track.unsettled", lambda *a, **k: _wrap([]))
+    monkeypatch.setattr(run, "pick_topic", _dummy_topic)
+    monkeypatch.setattr("meshpilot.agent.seo.generate.author",
+                        lambda *a, **k: _wrap((_Dupe(), [])))
+    monkeypatch.setattr("meshpilot.agent.seo.generate.facts_for", lambda *a, **k: _wrap(""))
+    res = await run.run_publish("b", {"repo": repo})
+    assert res["published"] is False and "already published" in res["reason"]
+
+
+async def test_dry_run_authors_but_never_touches_the_repo(monkeypatch, repo):
+    monkeypatch.setattr("meshpilot.agent.seo.track.unsettled", lambda *a, **k: _wrap([]))
+    monkeypatch.setattr(run, "pick_topic", _dummy_topic)
+    monkeypatch.setattr("meshpilot.agent.seo.generate.author", lambda *a, **k: _wrap((_Post(), [])))
+    monkeypatch.setattr("meshpilot.agent.seo.generate.facts_for", lambda *a, **k: _wrap(""))
+    before = pathlib.Path(repo, "src/data/blog.ts").read_text()
+    res = await run.run_publish("b", {"repo": repo, "dry_run": True})
+    assert res["authored"] and not res["published"] and res["reason"] == "dry_run"
+    assert pathlib.Path(repo, "src/data/blog.ts").read_text() == before
+
+
+async def _wrap(v):
+    return v
+
+
+async def _dummy_topic(*a, **k):
+    return "how trailing drawdown interacts with weekend gaps"
+
+
+# ── the registry ──
+def test_both_capabilities_are_schedulable():
+    assert "seo_publish" in caps.names() and "seo_settle" in caps.names()
+
+
+def test_publishing_into_someone_elses_repo_demands_the_publish_capability():
+    assert caps.required_capabilities("seo_publish") == frozenset({"publish"})
+
+
+def test_settling_is_not_bundled_into_publishing():
+    """The run that publishes does not get to mark its own homework in the same breath."""
+    assert caps.required_capabilities("seo_settle") == frozenset()
+    assert "seo_settle" not in caps.REQUIRED_CAPABILITIES["seo_publish"]
+
+
+def test_seo_publish_gets_headroom_for_the_sites_own_gates():
+    from meshpilot.agent.cron.service import timeout_for
+
+    assert timeout_for("seo_publish") == 1800
+
+
+# ── one post in flight (SEO-6) ──
+async def test_a_post_awaiting_review_blocks_the_next_one(monkeypatch, repo):
+    """Every post inserts at the same anchor — the top of the array — so two open PRs always
+    conflict. #558 and #559 both landed on it and #559 could not be rebased at all. Serialising
+    removes the conflict class instead of teaching the publisher to resolve it."""
+    from meshpilot.agent.seo import track
+
+    async def _open(brand_id, **kw):
+        return [{"slug": "already-open", "pr_url": "https://example.test/pr/1"}]
+
+    monkeypatch.setattr(track, "unsettled", _open)
+    res = await run.run_publish("b", {"repo": repo})
+    assert res["skipped"] == "post_in_flight"
+    assert res["waiting_on"] == ["https://example.test/pr/1"]
+
+
+async def test_nothing_in_flight_lets_the_cycle_proceed(monkeypatch, repo):
+    from meshpilot.agent.seo import track
+
+    async def _none(brand_id, **kw):
+        return []
+
+    monkeypatch.setattr(track, "unsettled", _none)
+    monkeypatch.setattr("meshpilot.agent.seo.track.unsettled", lambda *a, **k: _wrap([]))
+    monkeypatch.setattr(run, "pick_topic", _dummy_topic)
+    monkeypatch.setattr("meshpilot.agent.seo.generate.author", lambda *a, **k: _wrap((_Post(), [])))
+    monkeypatch.setattr("meshpilot.agent.seo.generate.facts_for", lambda *a, **k: _wrap(""))
+    res = await run.run_publish("b", {"repo": repo, "dry_run": True})
+    assert res.get("authored") is True
+
+
+async def test_a_dry_run_without_a_brand_does_not_query_for_open_prs(monkeypatch, repo):
+    """No brand means no track record to consult — a harness run should not need a database."""
+    monkeypatch.setattr("meshpilot.agent.seo.track.unsettled", lambda *a, **k: _wrap([]))
+    monkeypatch.setattr(run, "pick_topic", _dummy_topic)
+    monkeypatch.setattr("meshpilot.agent.seo.generate.author", lambda *a, **k: _wrap((_Post(), [])))
+    monkeypatch.setattr("meshpilot.agent.seo.generate.facts_for", lambda *a, **k: _wrap(""))
+    res = await run.run_publish("", {"repo": repo, "dry_run": True})
+    assert res.get("skipped") != "post_in_flight"
+    assert res.get("authored") is True
+
+
+# ── the checkout must not be stale (SEO-12) ──
+async def test_the_cycle_refreshes_the_checkout_before_reading_what_is_published(monkeypatch, repo):
+    """The duplicate guard reads `blog.ts`, so a stale `blog.ts` is a guard that cannot see the thing
+    it guards against. On 2026-09-03 the cycle proposed "Grid and martingale EAs…" hours after
+    `hedging-grid-martingale-bans-…` had merged upstream, because nothing pulled."""
+    from meshpilot.agent.seo import track
+
+    ran = []
+
+    async def _runner(cmd, cwd):
+        ran.append(cmd)
+        return 0, "ok"
+
+    monkeypatch.setattr("meshpilot.agent.seo.publish._run", _runner)
+    monkeypatch.setattr(track, "unsettled", lambda *a, **k: _wrap([]))
+    monkeypatch.setattr("meshpilot.agent.seo.track.unsettled", lambda *a, **k: _wrap([]))
+    monkeypatch.setattr(run, "pick_topic", _dummy_topic)
+    monkeypatch.setattr("meshpilot.agent.seo.generate.author", lambda *a, **k: _wrap((_Post(), [])))
+    monkeypatch.setattr("meshpilot.agent.seo.generate.facts_for", lambda *a, **k: _wrap(""))
+    await run.run_publish("b", {"repo": repo, "dry_run": True})
+    assert any("git fetch" in c for c in ran)
+    # Resolved from the CURRENT branch, not `origin/HEAD` — that symref is undefined in a fresh
+    # clone, including an `actions/checkout` working copy, where it failed on every run.
+    assert any("merge --ff-only --quiet origin/ok" in c for c in ran)
+    assert not any("origin/HEAD" in c for c in ran)
+
+
+async def test_a_failed_refresh_does_not_stop_the_run(monkeypatch, repo):
+    """An offline run on a slightly stale tree beats no run at all, and `insert_post`'s duplicate
+    guard is the backstop."""
+    from meshpilot.agent.seo import track
+
+    async def _runner(cmd, cwd):
+        return 1, "fatal: could not read from remote"
+
+    monkeypatch.setattr("meshpilot.agent.seo.publish._run", _runner)
+    monkeypatch.setattr(track, "unsettled", lambda *a, **k: _wrap([]))
+    monkeypatch.setattr("meshpilot.agent.seo.track.unsettled", lambda *a, **k: _wrap([]))
+    monkeypatch.setattr(run, "pick_topic", _dummy_topic)
+    monkeypatch.setattr("meshpilot.agent.seo.generate.author", lambda *a, **k: _wrap((_Post(), [])))
+    monkeypatch.setattr("meshpilot.agent.seo.generate.facts_for", lambda *a, **k: _wrap(""))
+    res = await run.run_publish("b", {"repo": repo, "dry_run": True})
+    assert res.get("authored") is True
+
+
+# ── the guard must fail CLOSED (2026-09-10) ──
+async def test_an_unreadable_track_record_refuses_rather_than_publishing(monkeypatch, repo):
+    """`unsettled()` used to return `[]` on any database error, and this is the IN-FLIGHT GUARD — so
+    a connection blip read as "nothing is open" and would publish a second post at the same anchor,
+    recreating the #558/#559 conflict the guard exists to prevent. A real blip
+    (`ConnectionDoesNotExistError`) did occur on 2026-09-10, harmlessly, elsewhere.
+
+    A guard that cannot see must refuse. One missing post costs a day; guessing wrong costs a human
+    untangling a merge conflict."""
+    monkeypatch.setattr("meshpilot.agent.seo.track.unsettled", lambda *a, **k: _wrap(None))
+    res = await run.run_publish("b", {"repo": repo, "dry_run": True})
+    assert res["skipped"] == "in_flight_unknown"
+
+
+async def test_looked_and_found_nothing_is_not_the_same_as_could_not_look(monkeypatch, repo):
+    monkeypatch.setattr("meshpilot.agent.seo.track.unsettled", lambda *a, **k: _wrap([]))
+    monkeypatch.setattr(run, "pick_topic", _dummy_topic)
+    monkeypatch.setattr("meshpilot.agent.seo.generate.author", lambda *a, **k: _wrap((_Post(), [])))
+    monkeypatch.setattr("meshpilot.agent.seo.generate.facts_for", lambda *a, **k: _wrap(""))
+    res = await run.run_publish("b", {"repo": repo, "dry_run": True})
+    assert res.get("authored") is True
+
+
+async def test_a_detached_head_is_not_fast_forwarded(monkeypatch, repo):
+    """A CI checkout can land detached. Merging into a detached HEAD is meaningless, and guessing a
+    branch would be worse — skip the refresh and let the duplicate-slug guard be the backstop."""
+    from meshpilot.agent.seo import track
+
+    async def _runner(cmd, cwd):
+        return (0, "HEAD") if "rev-parse" in cmd else (0, "ok")
+
+    monkeypatch.setattr("meshpilot.agent.seo.publish._run", _runner)
+    monkeypatch.setattr(track, "unsettled", lambda *a, **k: _wrap([]))
+    assert await run._refresh_repo(repo) is False
+
+
+def test_known_sources_are_harvested_from_published_posts(repo):
+    """Self-improving by construction: every merged post adds its citation to the vocabulary."""
+    import pathlib as _p
+    blog = _p.Path(repo) / "src/data/blog.ts"
+    blog.write_text(blog.read_text().replace(
+        "{ slug: 'trailing-drawdown-explained',",
+        "{ sourceUrl: 'https://www.bis.org/x', slug: 'trailing-drawdown-explained',"))
+    assert run.known_sources(repo) == ["https://www.bis.org/x"]
+    assert run.domains_of(["https://www.bis.org/x", "https://ftmo.com/y"]) == ["www.bis.org", "ftmo.com"]

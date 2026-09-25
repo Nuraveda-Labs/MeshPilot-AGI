@@ -1,0 +1,397 @@
+"""OpenRouter transport (OpenAI Chat Completions) — the single LLM path for the whole agent.
+
+Migrated from the Anthropic Messages API to **OpenRouter** (2026-08-30). The ReAct loop and every
+caller still speak the ANTHROPIC shape (a `system` string, `tool_use`/`tool_result` content blocks,
+tool defs as {name,description,input_schema}); this module ADAPTS that to OpenRouter's
+OpenAI-compatible `/chat/completions` on the way out and translates the OpenAI response
+(`tool_calls`, `finish_reason`) back to the Anthropic shape on the way in — so nothing downstream
+changes. Same models (Claude), new provider.
+
+    OPENROUTER_API_KEY   required (sk-or-…)
+    AGENT_LLM_MODEL      default model for complete() (internal name or OpenRouter slug)
+    AGENT_LLM_BASE       override base URL (default https://openrouter.ai/api/v1)
+
+Internal Claude model names (e.g. `claude-sonnet-5`, `claude-haiku-4-5-20251001`) are normalized to
+OpenRouter slugs (`anthropic/claude-sonnet-5`, `anthropic/claude-haiku-4.5`), so callers keep their
+existing names. Web search uses OpenRouter's native web plugin (see `complete_web` +
+tools.py web_search/web_fetch). Anthropic-only features (prompt caching, output_config.effort) are
+not sent.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+
+import httpx
+import structlog
+
+log = structlog.get_logger(__name__)
+
+_DEFAULT_BASE = "https://openrouter.ai/api/v1"
+_DEFAULT_MODEL = "anthropic/claude-sonnet-5"
+_RETRYABLE = {429, 500, 502, 503, 529}
+_MAX_ATTEMPTS = 3
+_APP_HEADERS = {"HTTP-Referer": "https://meshpilot.app", "X-Title": "MeshPilot Agent"}
+
+# Internal (Anthropic-style) model names → OpenRouter slugs. Anything already containing "/" is
+# treated as an OpenRouter slug and passed through; unknown bare names get an "anthropic/" prefix.
+_MODEL_MAP = {
+    "claude-sonnet-5": "anthropic/claude-sonnet-5",
+    "claude-haiku-4-5": "anthropic/claude-haiku-4.5",
+    # Legacy internal name still returned by `agent_llm.model_for("cheap")`. Kept as an alias so
+    # existing callers normalise correctly; new code should use the unsuffixed id.
+    "claude-haiku-4-5-20251001": "anthropic/claude-haiku-4.5",
+    "claude-opus-4-8": "anthropic/claude-opus-4.8",
+    "claude-opus-5": "anthropic/claude-opus-5",
+}
+
+
+def _key() -> str:
+    key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("OPENROUTER_API_KEY not set — required for the agent LLM (OpenRouter)")
+    return key
+
+
+def _normalize_model(m: str | None) -> str:
+    if not m:
+        return _DEFAULT_MODEL
+    if "/" in m:
+        return m
+    return _MODEL_MAP.get(m, f"anthropic/{m}")
+
+
+def _model(model: str | None) -> str:
+    return _normalize_model(model or os.environ.get("AGENT_LLM_MODEL") or _DEFAULT_MODEL)
+
+
+def _resolve_models(model: str | None, tier: str | None) -> list[str]:
+    """The OpenRouter `models` list (primary first) for a call: explicit model, else a routed tier,
+    else the default. A multi-entry list makes OpenRouter fail over across providers natively."""
+    if model:
+        return [_normalize_model(model)]
+    if tier:
+        from meshpilot.agent.loop import routing
+        return [_normalize_model(m) for m in routing.resolve(tier)]
+    return [_model(None)]
+
+
+def _flatten_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text")
+    return str(content)
+
+
+def _retry_delay(r: httpx.Response, attempt: int) -> float:
+    ra = ((getattr(r, "headers", None) or {}).get("retry-after") or "").strip()
+    if ra.replace(".", "", 1).isdigit():
+        return min(float(ra), 10.0)
+    return 0.5 * attempt
+
+
+# ── content translation ────────────────────────────────────────────────
+def _oai_content(content):
+    """Anthropic/OpenAI user content (str | block list) → OpenAI content. Handles image blocks both ways."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+    out = []
+    for b in content:
+        if not isinstance(b, dict):
+            out.append({"type": "text", "text": str(b)})
+            continue
+        t = b.get("type")
+        if t == "text":
+            out.append({"type": "text", "text": b.get("text", "")})
+        elif t == "image_url":            # already OpenAI-shaped
+            out.append({"type": "image_url", "image_url": b.get("image_url")})
+        elif t == "image" and isinstance(b.get("source"), dict):   # Anthropic image → OpenAI image_url
+            s = b["source"]
+            if s.get("type") == "base64":
+                url = f"data:{s.get('media_type', 'image/jpeg')};base64,{s.get('data', '')}"
+            else:
+                url = s.get("url", "")
+            if url:
+                out.append({"type": "image_url", "image_url": {"url": url}})
+        else:
+            out.append({"type": "text", "text": str(b)})
+    return out or ""
+
+
+def _to_openai_messages(messages: list[dict], system: str | None,
+                        cache_system: bool = False) -> list[dict]:
+    """Anthropic-shaped messages + system string → OpenAI messages (tool_calls / tool role).
+
+    `cache_system` marks the (stable) system prompt with a `cache_control` breakpoint — OpenRouter
+    forwards it to providers that support prompt caching (Anthropic/Gemini), giving a large discount
+    on the repeated prefix; ignored by providers that don't."""
+    oai: list[dict] = []
+    if system:
+        if cache_system:
+            oai.append({"role": "system",
+                        "content": [{"type": "text", "text": system,
+                                     "cache_control": {"type": "ephemeral"}}]})
+        else:
+            oai.append({"role": "system", "content": system})
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "assistant" and isinstance(content, list):
+            text_parts, tool_calls = [], []
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "text":
+                    text_parts.append(b.get("text", ""))
+                elif b.get("type") == "tool_use":
+                    tool_calls.append({"id": b.get("id"), "type": "function",
+                                       "function": {"name": b.get("name"),
+                                                    "arguments": json.dumps(b.get("input") or {})}})
+            msg: dict = {"role": "assistant", "content": "".join(text_parts) or None}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            oai.append(msg)
+        elif role == "user" and isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            for b in content:                                       # one OpenAI tool message per result
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    c = b.get("content", "")
+                    if isinstance(c, list):
+                        c = "\n".join(x.get("text", "") for x in c if isinstance(x, dict))
+                    oai.append({"role": "tool", "tool_call_id": b.get("tool_use_id"), "content": str(c)})
+        else:
+            oai.append({"role": role, "content": _oai_content(content)})
+    return oai
+
+
+def _to_openai_tools(tools: list[dict] | None) -> list[dict]:
+    return [{"type": "function",
+             "function": {"name": t.get("name"), "description": t.get("description", ""),
+                          "parameters": t.get("input_schema") or {"type": "object", "properties": {}}}}
+            for t in (tools or [])]
+
+
+_FINISH_MAP = {"tool_calls": "tool_use", "stop": "end_turn", "length": "max_tokens",
+               "content_filter": "refusal"}
+
+# _RETRY_ON_LENGTH — why an empty completion is an ERROR, and why ONE case of it is retried.
+#
+# A reasoning model spends output tokens thinking before it writes. Given a budget sized for the
+# ANSWER, it can consume the whole budget on reasoning and return `content: null` with
+# `finish_reason: "length"` — measured on `z-ai/glm-5.2`: 50 tokens -> nothing, 400 -> "ok" after 267
+# reasoning tokens. We used to translate that into `""` and hand it back as an answer, so every
+# caller on that tier silently received an empty string and carried on. That is how a whole tier
+# stayed broken without anyone noticing (SEO-4 found it, and the long-standing "deliberation returns
+# empty" symptom is very likely the same thing).
+#
+# Budget exhaustion is mechanically identifiable and mechanically fixable, so it earns exactly one
+# retry at a larger budget. An empty response for ANY OTHER reason is unexplained, and an unexplained
+# empty answer is a failure — it raises rather than pretending.
+_EMPTY_RETRY_FLOOR = 1500
+# ⚠️ This used to gate the retry as `max_tokens < _EMPTY_RETRY_CEILING`, so a caller asking for
+# EXACTLY 8000 — which the job scorer does — got no retry at all: 14 of 18 real scorings failed
+# outright while this module advertised an empty-completion retry. The ceiling now bounds the RAISE,
+# not whether the retry happens.
+_EMPTY_RETRY_CEILING = 16000
+
+
+def _from_openai_response(body: dict) -> dict:
+    """OpenAI response → Anthropic-shaped {content:[blocks], stop_reason, usage, _id, _citations}."""
+    choice = (body.get("choices") or [{}])[0] or {}
+    msg = choice.get("message") or {}
+    blocks: list[dict] = []
+    txt = msg.get("content")
+    if isinstance(txt, list):
+        txt = "".join(x.get("text", "") for x in txt if isinstance(x, dict))
+    if txt:
+        blocks.append({"type": "text", "text": txt})
+    for tc in (msg.get("tool_calls") or []):
+        fn = tc.get("function") or {}
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except Exception:  # noqa: BLE001
+            args = {}
+        blocks.append({"type": "tool_use", "id": tc.get("id"), "name": fn.get("name"), "input": args})
+    stop = "tool_use" if msg.get("tool_calls") else _FINISH_MAP.get(choice.get("finish_reason"),
+                                                                     choice.get("finish_reason") or "end_turn")
+    u = body.get("usage") or {}
+    usage = {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}
+    if u.get("cost") is not None:
+        usage["cost"] = u["cost"]
+    citations = [a.get("url_citation", {}).get("url") for a in (msg.get("annotations") or [])
+                 if isinstance(a, dict)]
+    return {"content": blocks, "stop_reason": stop, "usage": usage, "_id": body.get("id"),
+            "_citations": [c for c in citations if c]}
+
+
+async def _send(payload: dict, *, timeout_s: int, client: httpx.AsyncClient | None) -> dict:
+    """POST /chat/completions with retry (Retry-After aware); return the response body or raise."""
+    base = (os.environ.get("AGENT_LLM_BASE") or _DEFAULT_BASE).rstrip("/")
+    headers = {"Authorization": f"Bearer {_key()}", "content-type": "application/json", **_APP_HEADERS}
+    owns = client is None
+    client = client or httpx.AsyncClient(timeout=timeout_s)
+    try:
+        r = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            r = await client.post(f"{base}/chat/completions", headers=headers, json=payload)
+            if r.status_code not in _RETRYABLE or attempt == _MAX_ATTEMPTS:
+                break
+            await asyncio.sleep(_retry_delay(r, attempt))
+    finally:
+        if owns:
+            await client.aclose()
+    if r.status_code >= 400:
+        raise RuntimeError(f"openrouter chat -> {r.status_code}: {r.text[:200]}")
+    return r.json()
+
+
+async def _meter(model: str, usage: dict, req_id: str | None) -> None:
+    """Attribute this call's tokens + cost to the active brand (COST-METER). Never raises."""
+    try:
+        from meshpilot.analytics.cost import get_brand, record_usage  # noqa: PLC0415
+        from meshpilot.analytics.cost.pricing import (  # noqa: PLC0415
+            anthropic_cost,
+            unknown_model_cost_usd,
+        )
+        # We ask for `usage: {include: true}`, so OpenRouter normally returns the REAL charge. When
+        # it does, this row is measured, not estimated — and saying so is the whole point of the
+        # flag: it is what separates "this number is the bill" from "this number is our arithmetic".
+        cost = usage.get("cost")
+        measured = cost is not None
+        if cost is None:                        # OpenRouter didn't return cost → estimate off the price book
+            cost = anthropic_cost(model.split("/")[-1], usage)
+        if cost is None:                        # not a Claude model either (#194) — don't guess a vendor's
+            cost = unknown_model_cost_usd()     # price tier, but $0.0 would make a real call look free (#196)
+        await record_usage(brand_id=get_brand(), vendor="openrouter", operation="chat",
+                           model=model, units=usage, cost_usd=cost, estimated=not measured,
+                           request_id=req_id)
+    except Exception:  # noqa: BLE001 — metering is best-effort, never breaks the LLM call
+        pass
+
+
+async def _chat(messages: list[dict], *, system: str | None, tools: list[dict] | None,
+                model: str | None = None, tier: str | None = None, max_tokens: int, timeout_s: int,
+                client: httpx.AsyncClient | None, plugins: list[dict] | None = None,
+                cache_system: bool = False, reasoning: dict | None = None) -> dict:
+    import time as _time
+
+    from meshpilot.agent.loop import routing
+    models = _resolve_models(model, tier)
+    payload: dict = {"models": models, "max_tokens": max_tokens,   # OpenRouter native fallback (first = primary)
+                     "messages": _to_openai_messages(messages, system, cache_system=cache_system),
+                     "usage": {"include": True}}
+    if reasoning:
+        payload["reasoning"] = reasoning
+    if tools:
+        payload["tools"] = _to_openai_tools(tools)
+    if plugins:
+        payload["plugins"] = plugins
+    t0 = _time.monotonic()
+    ok = True
+    try:
+        body = await _send(payload, timeout_s=timeout_s, client=client)
+    except Exception:
+        ok = False
+        routing.record(models[0], latency_ms=(_time.monotonic() - t0) * 1000, ok=False)
+        raise
+    resp = _from_openai_response(body)
+    used = body.get("model") or models[0]                 # the model OpenRouter actually served
+    routing.record(used, latency_ms=(_time.monotonic() - t0) * 1000, ok=ok)
+    await _meter(used, resp["usage"], resp.get("_id"))
+
+    if resp["content"]:
+        return resp
+
+    # An empty response is NOT an answer, and returning it as one is how a dead tier stayed invisible:
+    # callers got `""` and carried on. See `_RETRY_ON_LENGTH`.
+    if resp["stop_reason"] == "max_tokens":
+        # A REASONING model that hits the cap has spent the budget thinking and emitted nothing.
+        # Raising max_tokens is the wrong lever and was measured to make it WORSE: z-ai/glm-5.3 used
+        # 1,548 reasoning tokens at an 8k budget and 3,340 at 20k — a bigger allowance invites more
+        # reasoning, it does not force an answer. Capping the EFFORT does: the same call with
+        # `reasoning.effort=low` returned full content in 250 tokens at a quarter of the cost.
+        # So: cap effort first, and only then raise the budget (for a non-reasoning model that was
+        # genuinely just truncated).
+        raised = min(max(max_tokens * 4, _EMPTY_RETRY_FLOOR), _EMPTY_RETRY_CEILING)
+        log.warning("llm.empty_completion_retry", model=used, max_tokens=max_tokens, retry_with=raised,
+                    reasoning_effort="low",
+                    reasoning_tokens=resp["usage"].get("output_tokens", 0))
+        payload["reasoning"] = {"effort": "low"}
+        payload["max_tokens"] = raised
+        body = await _send(payload, timeout_s=timeout_s, client=client)
+        resp = _from_openai_response(body)
+        used = body.get("model") or models[0]
+        await _meter(used, resp["usage"], resp.get("_id"))
+        if resp["content"]:
+            return resp
+
+    routing.record(used, latency_ms=(_time.monotonic() - t0) * 1000, ok=False)
+    raise RuntimeError(
+        f"empty completion from {used} (stop_reason={resp['stop_reason']}, "
+        f"max_tokens={payload['max_tokens']}, output_tokens="
+        f"{resp['usage'].get('output_tokens', 0)}) — no text and no tool call")
+
+
+def _text(resp: dict) -> str:
+    return "".join(b.get("text", "") for b in resp["content"] if b.get("type") == "text").strip()
+
+
+async def complete(prompt: str, *, system: str | None = None, model: str | None = None,
+                   tier: str | None = None, timeout_s: int = 90,
+                   client: httpx.AsyncClient | None = None, effort: str | None = None) -> str:
+    """Single user turn → assistant text. `tier` routes to a model list (ROUTER); `model` overrides."""
+    _ = effort
+    resp = await _chat([{"role": "user", "content": prompt}], system=system, tools=None,
+                       model=model, tier=tier, max_tokens=2048, timeout_s=timeout_s, client=client)
+    return _text(resp)
+
+
+async def complete_messages(messages: list[dict], *, model: str | None = None, tier: str | None = None,
+                            max_tokens: int = 2048, temperature: float = 0.2,
+                            timeout_s: int = 90, client: httpx.AsyncClient | None = None,
+                            effort: str | None = None, reasoning: dict | None = None) -> str:
+    """OpenAI/LiteLLM-style messages (system extracted) → assistant text."""
+    _ = (temperature, effort)
+    system_parts, conv = [], []
+    for m in messages:
+        if m.get("role") == "system":
+            system_parts.append(_flatten_text(m.get("content", "")))
+        else:
+            conv.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+    system = "\n\n".join(p for p in system_parts if p) or None
+    resp = await _chat(conv, system=system, tools=None, model=model, tier=tier, max_tokens=max_tokens,
+                       timeout_s=timeout_s, client=client, reasoning=reasoning)
+    return _text(resp)
+
+
+async def complete_tools(messages: list[dict], *, tools: list[dict], system: str | None = None,
+                         model: str | None = None, tier: str | None = "complex",
+                         max_tokens: int = 2048, timeout_s: int = 120,
+                         client: httpx.AsyncClient | None = None, effort: str | None = None) -> dict:
+    """One native tool-use turn → assistant message {content, stop_reason, usage} (Anthropic shape).
+
+    The main ReAct loop defaults to the **complex** tier (ROUTER — quality-first + native fallback);
+    an explicit `model` — or the `AGENT_LLM_MODEL` env (the loop's documented override) — pins a single
+    model instead. Caller runs the returned tool_use blocks, sends tool_results back.
+    """
+    _ = effort
+    model = model or os.environ.get("AGENT_LLM_MODEL")   # loop override wins over the default tier (#177.1)
+    resp = await _chat(messages, system=system, tools=tools, model=model, tier=tier,
+                       max_tokens=max_tokens, timeout_s=timeout_s, client=client, cache_system=True)
+    return {"content": resp["content"], "stop_reason": resp["stop_reason"], "usage": resp["usage"]}
+
+
+async def complete_web(query: str, *, model: str | None = None, max_results: int = 5,
+                       timeout_s: int = 120, client: httpx.AsyncClient | None = None) -> tuple[str, list[str]]:
+    """A completion grounded in OpenRouter's NATIVE web plugin. Returns (answer_text, [source urls])."""
+    resp = await _chat(
+        [{"role": "user", "content": f"Search the web and answer concisely with key facts: {query}\n"
+                                     "Cite the sources you used."}],
+        system=None, tools=None, model=model, max_tokens=1500, timeout_s=timeout_s, client=client,
+        plugins=[{"id": "web", "max_results": max_results}])
+    return _text(resp), resp.get("_citations", [])

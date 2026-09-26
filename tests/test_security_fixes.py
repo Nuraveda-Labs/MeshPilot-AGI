@@ -122,6 +122,29 @@ def test_client_ip_trusts_cf_header_with_origin_secret(monkeypatch):
     assert ratelimit.client_ip(req) == "1.2.3.4"    # gate on → trust CF (it's the front)
 
 
+def _gate(monkeypatch):
+    monkeypatch.setattr("meshpilot.config.settings",
+                        lambda: type("S", (), {"origin_shared_secret": "s3cr3t", "origin_auth_header": "x-origin-auth"})())
+
+
+def test_client_ip_trusts_the_worker_header_when_the_origin_secret_is_presented(monkeypatch):
+    """Behind the Worker, CF-Connecting-IP is the Worker's own egress — the real client rides in
+    x-meshpilot-client-ip, and is believed only alongside the origin secret."""
+    from meshpilot.middleware import ratelimit
+    _gate(monkeypatch)
+    req = _Req({"x-meshpilot-client-ip": "5.6.7.8", "x-origin-auth": "s3cr3t",
+                "cf-connecting-ip": "2a06:98c0:3600::103"}, "10.9.8.7")
+    assert ratelimit.client_ip(req) == "5.6.7.8"
+
+
+def test_client_ip_ignores_a_forged_worker_header_without_the_secret(monkeypatch):
+    """A direct hit on the Cloud Run URL must not pick its own rate-limit key."""
+    from meshpilot.middleware import ratelimit
+    _gate(monkeypatch)
+    req = _Req({"x-meshpilot-client-ip": "5.6.7.8", "x-origin-auth": "wrong"}, "10.9.8.7")
+    assert ratelimit.client_ip(req) == "10.9.8.7"
+
+
 # ── #100: durable memory content is length-capped ──
 async def test_memory_content_is_truncated(monkeypatch):
     from meshpilot.agent.memory import store

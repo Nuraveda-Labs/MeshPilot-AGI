@@ -219,6 +219,13 @@ async def _cap_clipnet_publish(brand_id: str, args: dict) -> dict:
     return await publish_next(brand_id)
 
 
+async def _cap_clipnet_outcomes(brand_id: str, args: dict) -> dict:
+    """CLIPNET-LEARN L2: take each posted clip's 1h / 24h / 7d reading once, when due."""
+    from meshpilot.agent.clipnet.outcomes import collect
+
+    return await collect(brand_id)
+
+
 _REGISTRY: dict[str, CapFn] = {
     "curate": _cap_curate,
     "reconcile": _cap_reconcile,
@@ -240,6 +247,7 @@ _REGISTRY: dict[str, CapFn] = {
     "offpage_reply_standing": _cap_offpage_reply_standing,
     "clipnet_dispatch": _cap_clipnet_dispatch,
     "clipnet_publish": _cap_clipnet_publish,
+    "clipnet_outcomes": _cap_clipnet_outcomes,
 }
 
 
@@ -281,6 +289,8 @@ REQUIRED_CAPABILITIES: dict[str, frozenset[str]] = {
     "clipnet_dispatch": frozenset({"media"}),
     # Posts to five public platforms.
     "clipnet_publish": frozenset({"publish"}),
+    # Reads our own posts' stats back; grants nothing outward.
+    "clipnet_outcomes": frozenset(),
 }
 
 

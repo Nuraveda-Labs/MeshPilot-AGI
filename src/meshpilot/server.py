@@ -182,7 +182,12 @@ async def _on_shutdown() -> None:
 # Health
 # ---------------------------------------------------------------------------
 
+# `/health` is the same handler. ⚠️ Cloud Run's front end RESERVES every URL path ending in `z`
+# and answers `/healthz` with Google's own 404 before the request reaches the container (found in
+# lane CLOUDRUN, 2026-09-25). The Cloudflare Worker in front rewrites `/healthz` to `/health`, so
+# callers keep using the old path; the container just needs a name Cloud Run lets through.
 @app.get("/healthz")
+@app.get("/health")
 async def healthz() -> dict:
     """Liveness, plus whether the cron scheduler is still sweeping.
 

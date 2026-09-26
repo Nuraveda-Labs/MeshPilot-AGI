@@ -98,6 +98,19 @@ NO_SHIP_DIRS = ("tests/operator",)
 # NOT shipped, deliberately: `CLAUDE.md`, `AGENTS.md`, `KIMI.md` (the operator's own agent
 # instructions, thick with private operational detail) and `.fastapicloudignore` (our hosting
 # choice, not the template's).
+# Files that ship at a DIFFERENT path than they live at: source -> path in the export.
+# `template/.github/workflows/ci.yml` cannot live at `.github/workflows/ci.yml` here, because
+# this repo's own CI already occupies that path and is drift-aware, gates on `production` and
+# builds `web/` — none of which the template has.
+#
+# ⚠️ Before this existed the template's CI lived ONLY in the public repo, so a mirroring sync
+# would have DELETED it on the first run. Keeping it here means the export is a complete
+# description of the public tree, which is what makes sync safe to mirror.
+# The sources are in the manifest, so the gate scans them like anything else that ships.
+TEMPLATE_OVERLAY = {
+    "template/.github/workflows/ci.yml": ".github/workflows/ci.yml",
+}
+
 SHIP_FILES = (
     "README.md", "LICENSE", "ARCHITECTURE.md", ".env.example",
     "pyproject.toml", "uv.lock", "main.py", ".gitignore",
@@ -296,6 +309,9 @@ def unresolved_manifest_entries() -> list[str]:
     for f in SHIP_DOCS:
         if not (ROOT / "docs" / f).exists():
             missing.append(f"SHIP_DOCS: docs/{f}")
+    for src, dest in TEMPLATE_OVERLAY.items():
+        if not (ROOT / src).exists():
+            missing.append(f"TEMPLATE_OVERLAY: {src} (would ship as {dest})")
     return missing
 
 
@@ -337,6 +353,9 @@ def _manifest_paths() -> list[pathlib.Path]:
     for f in SHIP_FILES:
         if (ROOT / f).exists():
             out.append(ROOT / f)
+    for src in TEMPLATE_OVERLAY:
+        if (ROOT / src).exists():
+            out.append(ROOT / src)
     for f in SHIP_DOCS:
         if (ROOT / "docs" / f).exists():
             out.append(ROOT / "docs" / f)

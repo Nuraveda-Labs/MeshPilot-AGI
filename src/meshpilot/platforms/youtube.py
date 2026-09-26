@@ -174,6 +174,10 @@ async def upload_video(
                     if not vid:
                         raise YouTubeUploadFailed(f"upload finished without an id: {str(body)[:300]}")
                     log.info("youtube.upload.done", brand_id=brand_id, video_id=vid, privacy=privacy)
+                    from meshpilot.comms.post_alerts import announce_post
+
+                    await announce_post(brand_id, "youtube", url=f"https://youtu.be/{vid}", ref=vid,
+                                        text=title)
                     return UploadResult(vid, f"https://youtu.be/{vid}", privacy)
                 else:
                     raise YouTubeUploadFailed(

@@ -40,7 +40,10 @@ MEASURABLE = ("facebook", "instagram")
 # the better signal anyway — reach is mostly the algorithm's choice, engagement is the post's.
 _FB_METRICS = ("post_clicks", "post_reactions_by_type_total", "post_activity_by_action_type",
                "post_video_views")
-_IG_METRICS = ("reach", "likes", "comments", "saves", "shares", "views")
+# ⚠️ `saved`, not `saves` (measured 2026-09-25): Meta rejects `saves` with "(#100) metric[0] must be
+# one of…", and ONE invalid name fails the whole request — so every IG read had been returning None
+# and no Instagram outcome was ever recorded. Probed each name individually against a live Reel.
+_IG_METRICS = ("reach", "likes", "comments", "saved", "shares", "views")
 
 
 def _base() -> str:
@@ -157,6 +160,45 @@ async def facebook_post(post_id: str, *, brand_id: str | None = None,
             await c.aclose()
 
 
+async def facebook_video(video_id: str, *, brand_id: str | None = None,
+                         client: httpx.AsyncClient | None = None) -> dict[str, Any] | None:
+    """Views + engagement for a Page VIDEO.
+
+    A video posted through /{page}/videos returns a VIDEO id, not a `<page>_<post>` post id, and a
+    video node has no `/insights` edge ("(#100) Tried accessing nonexisting field (insights)",
+    measured 2026-09-25) — so facebook_post() could never read one. `views` is a plain field.
+    """
+    try:
+        page_id, system_token = resolve_facebook_creds(brand_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("insights.fb_creds_missing", error=str(exc)[:160])
+        return None
+    own = client is None
+    c = client or httpx.AsyncClient(timeout=_TIMEOUT_S)
+    try:
+        token = await _page_token(page_id, system_token, c)
+        if not token:
+            return None
+        r = await c.get(f"{_base()}/{video_id}",
+                        params={"fields": "views,comments.summary(true),reactions.summary(true)"},
+                        headers=_auth(token))
+        r.raise_for_status()
+        e = r.json()
+        result = {
+            "video_views": e.get("views"),
+            "likes": ((e.get("reactions") or {}).get("summary") or {}).get("total_count"),
+            "comments": ((e.get("comments") or {}).get("summary") or {}).get("total_count"),
+            "raw": {"video": e},
+        }
+        return result if _measured(result) else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("insights.fb_video_failed", video_id=video_id, error=_safe(exc))
+        return None
+    finally:
+        if own:
+            await c.aclose()
+
+
 async def instagram_media(media_id: str, *, brand_id: str | None = None,
                           client: httpx.AsyncClient | None = None) -> dict[str, Any] | None:
     """Reach/likes/comments/saves/shares/views for one IG media, or None if it cannot be read."""
@@ -177,7 +219,7 @@ async def instagram_media(media_id: str, *, brand_id: str | None = None,
             "reach": m.get("reach"),
             "likes": m.get("likes"),
             "comments": m.get("comments"),
-            "saves": m.get("saves"),
+            "saves": m.get("saved"),
             "shares": m.get("shares"),
             "video_views": m.get("views"),
             "raw": {"insights": m},
@@ -198,6 +240,9 @@ async def fetch(platform: str, provider_post_id: str, *, brand_id: str | None = 
     """Dispatch to the right reader. None means NOT MEASURED — never treat it as zero."""
     p = (platform or "").lower()
     if p == "facebook":
+        # Page post ids are `<page>_<post>`; a bare numeric id is a VIDEO (see facebook_video).
+        if "_" not in str(provider_post_id):
+            return await facebook_video(provider_post_id, brand_id=brand_id, client=client)
         return await facebook_post(provider_post_id, brand_id=brand_id, client=client)
     if p == "instagram":
         return await instagram_media(provider_post_id, brand_id=brand_id, client=client)

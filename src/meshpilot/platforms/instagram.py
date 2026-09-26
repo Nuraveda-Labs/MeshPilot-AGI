@@ -147,4 +147,7 @@ async def publish_instagram(
             pass
 
     log.info("instagram.published", ig_user_id=ig_user_id, media_id=media_id)
+    from meshpilot.comms.post_alerts import announce_post
+
+    await announce_post(brand_id, "instagram", url=permalink or None, ref=media_id, text=caption)
     return media_id, permalink

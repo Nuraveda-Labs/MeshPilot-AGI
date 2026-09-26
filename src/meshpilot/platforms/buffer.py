@@ -268,12 +268,49 @@ async def create_post(
     post = payload.get("post") or {}
     log.info("buffer.create_post.ok", brand_id=brand_id, service=service,
              channel_id=channel_id, post_id=post.get("id"), status=post.get("status"))
+    from meshpilot.comms.post_alerts import announce_post
+
+    await announce_post(brand_id, service, ref=post.get("id"), text=text)
     return post.get("id"), post.get("status")
 
 
 # ---------------------------------------------------------------------------
 # Publish entry point
 # ---------------------------------------------------------------------------
+
+
+# Buffer's PostMetric names → our column names (measured 2026-09-25 on TikTok / YouTube / X posts).
+_BUFFER_METRICS = {"Video Views": "video_views", "Reactions": "likes", "Comments": "comments",
+                   "Shares": "shares", "Reposts": "shares", "Reach": "reach",
+                   "Impressions": "impressions", "Clicks": "clicks"}
+_POST_METRICS_QUERY = ("query($i: PostInput!) { post(input: $i) { status metricsUpdatedAt "
+                       "metrics { name value unit } } }")
+
+
+def normalise_metrics(metrics: list[dict] | None) -> dict:
+    out: dict = {}
+    for m in metrics or []:
+        col = _BUFFER_METRICS.get(str(m.get("name")))
+        if col and m.get("value") is not None:
+            try:
+                out[col] = int(float(m["value"]))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+async def post_metrics(post_id: str, *, brand_id: str) -> dict | None:
+    """Per-post stats Buffer has collected for a TikTok / YouTube / X post, or None if Buffer has not
+    measured it yet (`metricsUpdatedAt` null). Zeros with a timestamp ARE a measurement."""
+    try:
+        d = await _graphql(_buffer_token(brand_id), _POST_METRICS_QUERY, {"i": {"id": post_id}})
+    except Exception as exc:  # noqa: BLE001 — a metrics read must never disturb anything else
+        log.warning("buffer.metrics_failed", post_id=post_id, error=str(exc)[:200])
+        return None
+    post = d.get("post") or {}
+    if not post.get("metricsUpdatedAt"):
+        return None
+    return {**normalise_metrics(post.get("metrics")), "raw": {"buffer": post}}
 
 
 async def poll_status_for_post(

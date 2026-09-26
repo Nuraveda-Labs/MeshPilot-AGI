@@ -129,4 +129,7 @@ async def publish_facebook(
     post_id = j.get("post_id") or j.get("id") or ""
     permalink = f"https://www.facebook.com/{post_id}" if post_id else ""
     log.info("facebook.published", page_id=page_id, post_id=post_id)
+    from meshpilot.comms.post_alerts import announce_post
+
+    await announce_post(brand_id, "facebook", url=permalink or None, ref=post_id, text=message)
     return post_id, permalink

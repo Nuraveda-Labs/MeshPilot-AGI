@@ -104,6 +104,58 @@ def gate(clip: dict, campaign: Any) -> str | None:
     return None
 
 
+def pick_for(stage_outputs: dict, start_s: float) -> dict:
+    """The worker's pick record for this clip (text, Jev score, pick reason), matched on start time."""
+    for p in (stage_outputs or {}).get("picks") or []:
+        if abs(float(p.get("start", -1)) - float(start_s)) < 0.5:
+            return p
+    return {}
+
+
+def episode_for(brand_id: str, clip: dict, campaign_slug: str, *, results: dict | None = None,
+                blocked_reason: str | None = None) -> tuple[str, dict]:
+    """(content, metadata) for the brand-memory episode of one clip (CLIPNET-LEARN L1).
+
+    Content is what a human (and the curator) reads; metadata is what the metrics join and the
+    learner key on. Written for published AND blocked clips — a block is a lesson too.
+    """
+    so = clip.get("stage_outputs") or {}
+    pick = pick_for(so, clip["start_s"])
+    source = (so.get("source") or {}).get("key", "")
+    dur = float(clip.get("end_s") or 0) - float(clip.get("start_s") or 0)
+    posted = {p: r.get("url") for p, r in (results or {}).items() if r.get("status") == "posted"}
+    failed = {p: r.get("error") for p, r in (results or {}).items() if r.get("status") != "posted"}
+    if blocked_reason:
+        head = f"Clip BLOCKED before posting ({campaign_slug}): {clip.get('hook')!r}. Reason: {blocked_reason}."
+    else:
+        head = (f"Posted clip ({campaign_slug}) to {', '.join(posted) or 'no platform'}: hook "
+                f"{clip.get('hook')!r}, {dur:.0f}s from {source} at {float(clip['start_s']):.0f}s.")
+    why = f" Picked because: {pick['why']}" if pick.get("why") else ""
+    excerpt = " ".join((pick.get("text") or "").split())[:400]
+    content = head + why + (f" Transcript: {excerpt}" if excerpt else "")
+    metadata = {
+        "capability": "clipnet", "clip_id": str(clip["id"]), "job_id": str(clip.get("job_id") or ""),
+        "campaign": campaign_slug, "hook": clip.get("hook"), "source": source,
+        "start_s": float(clip["start_s"]), "duration_s": round(dur, 1), "jev": pick.get("jev"),
+        "outcome": "blocked" if blocked_reason else "posted", "blocked_reason": blocked_reason,
+        "links": posted, "failed": failed,
+    }
+    return content, metadata
+
+
+async def _remember(brand_id: str, content: str, metadata: dict) -> bool:
+    """Best effort, bounded: the post already happened; memory must never undo or delay it."""
+    from meshpilot.agent.memory.store import remember
+
+    try:
+        await asyncio.wait_for(remember(brand_id, "episode", content, metadata=metadata,
+                                        importance=0.5, source="clipnet"), timeout=30)
+        return True
+    except Exception as exc:
+        log.warning("clipnet.remember_failed", brand_id=brand_id, error=str(exc)[:200])
+        return False
+
+
 def youtube_title(hook: str, hashtags: tuple[str, ...]) -> str:
     return " ".join([hook.strip(), *hashtags, "#shorts"])[:100]
 
@@ -167,12 +219,14 @@ def _engine_or(engine: Any):
 
 
 async def publish_next(brand_id: str, *, engine: Any = None, post: Any = None, record: Any = None,
-                       platforms: tuple[str, ...] | None = None, notify_fn: Any = None) -> dict:
+                       platforms: tuple[str, ...] | None = None, notify_fn: Any = None,
+                       remember_fn: Any = None) -> dict:
     from meshpilot.agent.clipnet.campaigns import load_campaign
 
     if not enabled():
         return {"skipped": "agent_clipnet_enabled / agent_publish_enabled is off"}
     post, record, eng = post or _post_one, record or _record, _engine_or(engine)
+    remember_fn = remember_fn or _remember
     platforms = platforms if platforms is not None else configured_platforms(brand_id)
     if not platforms:
         return {"published": None, "reason": "brand has no configured publishing platform"}
@@ -199,6 +253,7 @@ async def publish_next(brand_id: str, *, engine: Any = None, post: Any = None, r
     if reason:  # notified outside the transaction: a slow Discord call must not hold row locks
         log.warning("clipnet.gate_blocked", brand_id=brand_id, clip_id=str(clip["id"]), reason=reason)
         await (notify_fn or _notify)(brand_id, f"🛑 **Clip blocked, not posted:** {clip['hook']}\n{reason}")
+        await remember_fn(brand_id, *episode_for(brand_id, clip, clip["campaign"], blocked_reason=reason))
         return {"published": None, "blocked": str(clip["id"]), "reason": reason}
 
     results: dict[str, dict] = {}
@@ -229,6 +284,7 @@ async def publish_next(brand_id: str, *, engine: Any = None, post: Any = None, r
     submit_by_local = datetime.fromtimestamp(submit_by, UTC).strftime("%H:%M UTC")
     await (notify_fn or _notify)(brand_id, published_message(clip["hook"] or "", results,
                                                              campaign.submit_platforms, submit_by_local))
-    return {"published": str(clip["id"]), "hook": clip["hook"], "results": results,
+    remembered = await remember_fn(brand_id, *episode_for(brand_id, clip, campaign.slug, results=results))
+    return {"published": str(clip["id"]), "hook": clip["hook"], "results": results, "remembered": remembered,
             "submit_to_whop": {p: results[p]["url"] for p in campaign.submit_platforms if p in results},
             "sheet_error": sheet_err}

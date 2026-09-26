@@ -66,6 +66,24 @@ No inbound port (it's a websocket client), so it needs no public domain or healt
 
 Configured by `DISCORD_CHANNEL_BRANDS`, a JSON map `{"<channel_id>": {"brand": …, "prefix": …}}`.
 
+### CLIPNET `#clip-queue` channels
+
+A second, separate mapping, `CLIPQUEUE_CHANNEL_BRANDS`, same shape plus an optional default
+`campaign`: `{"<channel_id>": {"brand": "ai_empire", "prefix": "AIE", "campaign": "lovable"}}`.
+YouTube links pasted in one of those channels are queued for THAT brand via
+`POST /internal/clipnet/jobs` with `<PREFIX>_JOBS_AUTH_TOKEN` — the channel is the brand
+declaration, exactly as for chat. Add `campaign: <slug>` to a message to override the default.
+Results (post links, the Whop deadline, failed/blocked jobs) are posted back by the API, which reads
+the same channel id from `<PREFIX>_CLIPNET_DISCORD_CHANNEL_ID`. A route whose token is unset is
+dropped and logged at startup, never guessed. Channels live 2026-09-25: `#clip-queue-ai-empire`,
+`#clip-queue-entertainment-vault`, `#clip-queue-hypedrop-gaming` (MeshPilot category).
+
+⚠️ Railway builds this service from GitHub with **watch paths `gateway/**` + wait-for-CI**. A
+`railway up` upload has no commit/CI and is **SKIPPED** — ship by merging a change under `gateway/`.
+After the 2026-09-23 repo transfer the GitHub source had to be reconnected to
+[this repository](https://github.com/Nuraveda-Labs/meshpilot-digital-marketing-agent) (it had
+not deployed since 2026-09-21).
+
 Why per-channel rather than one global chat: there is **no brand inference from message text**, so
 a message can never silently run as the wrong brand, and a referent like "I don't like that
 content" resolves against the right project's episodes without asking. Authorisation stays scoped

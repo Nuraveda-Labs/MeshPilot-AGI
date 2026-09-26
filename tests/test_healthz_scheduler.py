@@ -43,3 +43,9 @@ async def test_healthz_leaks_no_job_or_brand_detail(monkeypatch):
     out = await server.healthz()
     assert set(out["scheduler"]) <= {"cron_enabled", "last_run_age_s", "worst_overdue_s", "error"}
     assert set(out) == {"status", "service", "version", "dispatch_mode", "scheduler"}
+
+
+def test_health_is_the_same_endpoint_as_healthz():
+    """Cloud Run swallows any path ending in `z`, so `/health` must serve the identical handler."""
+    routes = {r.path: r.endpoint for r in server.app.routes if getattr(r, "path", None) in ("/health", "/healthz")}
+    assert routes["/health"] is routes["/healthz"] is server.healthz

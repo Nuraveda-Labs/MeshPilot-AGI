@@ -7,6 +7,7 @@ is the Cloudflare WAF once api.meshpilot.app is proxied. The constant-keyed glob
 """
 from __future__ import annotations
 
+import hmac
 import json
 import threading
 import time
@@ -69,6 +70,9 @@ class SlidingWindowLimiter:
             self._hits.clear()
 
 
+CLIENT_IP_HEADER = "x-meshpilot-client-ip"   # set by the Cloudflare Worker in front of Cloud Run
+
+
 def client_ip(request: Any) -> str:
     """Best-effort client IP for the rate-limit key (NOT a security control).
 
@@ -81,7 +85,17 @@ def client_ip(request: Any) -> str:
     # per-IP throttling (#98), so without the gate we key on the unspoofable socket peer.
     from meshpilot.config import settings
 
-    if settings().origin_shared_secret:
+    s = settings()
+    if s.origin_shared_secret:
+        # CLOUDRUN: behind the Cloudflare Worker, CF-Connecting-IP on the Worker's subrequest is the
+        # WORKER's egress address (Cloudflare sets it; the Worker cannot), so every visitor would
+        # share one rate-limit key. The Worker forwards the real client here instead. Trusted only
+        # when the same request proves it came through the Worker by carrying the origin secret, so
+        # a direct hit on the Cloud Run URL cannot pick its own key.
+        forwarded = request.headers.get(CLIENT_IP_HEADER)
+        presented = request.headers.get(getattr(s, "origin_auth_header", "x-origin-auth")) or ""
+        if forwarded and hmac.compare_digest(presented.encode(), s.origin_shared_secret.encode()):
+            return forwarded.strip()
         cf = request.headers.get("cf-connecting-ip")
         if cf:
             return cf.strip()
@@ -129,7 +143,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         # /healthz = platform probes; /webhooks/* + /resend/webhook = provider callbacks
         # (signature-verified, retried on failure — must not be rate-limited).
-        if path == "/healthz" or path.startswith("/webhooks") or path == "/resend/webhook":
+        if path in ("/healthz", "/health") or path.startswith("/webhooks") or path == "/resend/webhook":
             return await call_next(request)
         allowed, retry = await self._check(client_ip(request))
         if not allowed:

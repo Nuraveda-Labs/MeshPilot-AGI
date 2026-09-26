@@ -98,3 +98,44 @@ def test_start_execution_raises_on_a_refusal():
 
     with pytest.raises(RuntimeError, match="403"):
         worker_client.start_execution("job-1", "aie-media", session=_S())
+
+
+# ── CLIPNET-LEARN L1: every clip becomes a brand-memory episode ─────────────────────────────────
+
+def _learn_clip():
+    return {"id": "clip-1", "job_id": "job-1", "start_s": 316.2, "end_s": 373.9, "hook": "The 99 percent can build",
+            "caption": "x #LovablePartner",
+            "stage_outputs": {"source": {"key": "youtube:9FGMhz-e97k"},
+                              "picks": [{"start": 316.2, "jev": 2.4, "why": "self-contained guest answer",
+                                         "text": "With Lovable the 99 percent can finally build."}]}}
+
+
+def test_a_published_episode_carries_hook_links_and_pick_reason():
+    content, meta = publish.episode_for("ai_empire", _learn_clip(), "lovable", results={
+        "instagram": {"status": "posted", "url": "https://ig/1", "error": None},
+        "tiktok": {"status": "failed", "url": None, "error": "boom"}})
+    assert "Posted clip (lovable) to instagram" in content and "self-contained guest answer" in content
+    assert meta["outcome"] == "posted" and meta["links"] == {"instagram": "https://ig/1"}
+    assert meta["failed"] == {"tiktok": "boom"} and meta["jev"] == 2.4 and meta["duration_s"] == 57.7
+    assert meta["capability"] == "clipnet" and meta["clip_id"] == "clip-1" and meta["source"] == "youtube:9FGMhz-e97k"
+
+
+def test_a_blocked_clip_is_remembered_with_its_reason():
+    content, meta = publish.episode_for("ai_empire", _learn_clip(), "lovable", blocked_reason="missing #LovablePartner")
+    assert content.startswith("Clip BLOCKED before posting (lovable)") and "missing #LovablePartner" in content
+    assert meta["outcome"] == "blocked" and meta["links"] == {}
+
+
+def test_pick_for_matches_on_start_time():
+    so = {"picks": [{"start": 10.0, "why": "a"}, {"start": 316.25, "why": "b"}]}
+    assert publish.pick_for(so, 316.2)["why"] == "b" and publish.pick_for(so, 99.0) == {}
+
+
+async def test_a_memory_failure_never_raises(monkeypatch):
+    import meshpilot.agent.memory.store as store
+
+    async def boom(*a, **k):
+        raise RuntimeError("embeddings down")
+
+    monkeypatch.setattr(store, "remember", boom)
+    assert await publish._remember("ai_empire", "c", {}) is False

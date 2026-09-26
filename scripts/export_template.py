@@ -40,11 +40,13 @@ def export(out: pathlib.Path, *, make_commit: bool = False) -> tuple[int, list[s
 
     rels: list[str] = []
     for src in gate.ship_files():
-        rel = src.relative_to(gate.ROOT)
+        rel = src.relative_to(gate.ROOT).as_posix()
+        # Overlay files ship at a different path than they live at — see TEMPLATE_OVERLAY.
+        rel = gate.TEMPLATE_OVERLAY.get(rel, rel)
         dst = out / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
-        rels.append(str(rel))
+        rels.append(rel)
 
     if make_commit:
         # A single clean initial commit, NO remote. `git init` only — adding a remote or pushing
